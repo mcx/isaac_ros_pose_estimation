@@ -29,7 +29,9 @@ import rclpy
 NUM_SAMPLES = 5
 DISTANCE_THRESHOLD = 0.5
 ANGLE_THRESHOLD = 30.0
-TIMEOUT = 5.0
+SUBSCRIPTION_TIMEOUT = 30.0
+OUTPUT_TIMEOUT = 30.0
+POSE_STALE_TIMEOUT = 5.0
 
 
 @pytest.mark.rostest
@@ -45,7 +47,7 @@ def generate_test_description():
                 'num_samples': NUM_SAMPLES,
                 'distance_threshold': DISTANCE_THRESHOLD,
                 'angle_threshold': ANGLE_THRESHOLD,
-                'pose_stale_time_threshold': TIMEOUT
+                'pose_stale_time_threshold': POSE_STALE_TIMEOUT
             }]
         )
     ]
@@ -83,8 +85,6 @@ class IsaacROSOutlierFilterTest(IsaacROSBaseTest):
             [('pose_output', PoseStamped)], received_messages, accept_multiple_messages=True)
 
         try:
-            # Wait at most TIMEOUT seconds for subscriber to respond
-            end_time = time.time() + TIMEOUT
             done = False
 
             # Input poses
@@ -127,11 +127,25 @@ class IsaacROSOutlierFilterTest(IsaacROSBaseTest):
                 )),
             ]
 
+            # Wait for the node under test to subscribe to our publisher
+            subscription_end_time = time.time() + SUBSCRIPTION_TIMEOUT
+            while time.time() < subscription_end_time and pose_pub.get_subscription_count() == 0:
+                rclpy.spin_once(self.node, timeout_sec=(0.1))
+
+            self.assertGreater(pose_pub.get_subscription_count(), 0,
+                               'Node under test did not subscribe in time')
+
+            # Allow subscriber to fully initialize after discovery
+            for _ in range(5):
+                rclpy.spin_once(self.node, timeout_sec=(0.1))
+
+            # Publish all poses once
+            for pose in POSES_IN:
+                pose_pub.publish(pose)
+
             # Wait until received expected poses
-            while time.time() < end_time:
-                # Publish poses
-                for pose in POSES_IN:
-                    pose_pub.publish(pose)
+            output_end_time = time.time() + OUTPUT_TIMEOUT
+            while time.time() < output_end_time:
                 rclpy.spin_once(self.node, timeout_sec=(0.1))
                 if 'pose_output' in received_messages and \
                         len(received_messages['pose_output']) >= len(POSES_OUT):

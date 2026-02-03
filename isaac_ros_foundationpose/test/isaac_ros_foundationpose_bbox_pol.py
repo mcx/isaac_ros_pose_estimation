@@ -68,7 +68,7 @@ def generate_test_description():
                 '/test_cases/foundationpose/' + MESH_FILE_NAME,
 
             'refine_model_file_path':  os.path.dirname(__file__) +
-                '/../../test/models/' + engines['refine_model_name'],
+                '/models/' + engines['refine_model_name'],
             'refine_engine_file_path': engines['refine_engine_path'],
             'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
             'refine_input_binding_names': ['input1', 'input2'],
@@ -76,7 +76,7 @@ def generate_test_description():
             'refine_output_binding_names': ['output1', 'output2'],
 
             'score_model_file_path':  os.path.dirname(__file__) +
-                '/../../test/models/' + engines['score_model_name'],
+                '/models/' + engines['score_model_name'],
             'score_engine_file_path': engines['score_engine_path'],
             'score_input_tensor_names': ['input_tensor1', 'input_tensor2'],
             'score_input_binding_names': ['input1', 'input2'],

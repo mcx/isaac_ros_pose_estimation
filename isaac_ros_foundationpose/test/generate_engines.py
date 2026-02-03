@@ -16,6 +16,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import shutil
 import subprocess
 
 
@@ -29,6 +30,25 @@ SCORE_ENGINE_NAME = 'dummy_score_trt_engine.plan'
 
 REFINE_ENGINE_PATH = '/tmp/' + REFINE_ENGINE_NAME
 SCORE_ENGINE_PATH = '/tmp/' + SCORE_ENGINE_NAME
+
+
+def get_trtexec_path():
+    """
+    Get the path to trtexec executable.
+
+    Returns
+    -------
+    str
+        Path to trtexec executable, checking PATH first, then default location
+
+    """
+    # Check if trtexec is in PATH
+    trtexec_path = shutil.which('trtexec')
+    if trtexec_path:
+        return trtexec_path
+
+    # Default to TensorRT installation path
+    return '/usr/src/tensorrt/bin/trtexec'
 
 
 def generate_tensorrt_engine(engine_path, model_name, trtexec_args):
@@ -47,8 +67,9 @@ def generate_tensorrt_engine(engine_path, model_name, trtexec_args):
     """
     if not os.path.isfile(engine_path):
         print(f'Generating an engine file for the {model_name} model...')
-        # Prepend 'trtexec' to the arguments list.
-        cmd = ['/usr/src/tensorrt/bin/trtexec'] + trtexec_args
+        # Get trtexec path (check PATH first, then default)
+        trtexec_path = get_trtexec_path()
+        cmd = [trtexec_path] + trtexec_args
         print('Generating model engine file by command: ', ' '.join(cmd))
         result = subprocess.run(
             cmd,
@@ -73,8 +94,8 @@ def generate_foundationpose_engines():
     """
     # Get correct model paths (relative to test directory).
     base_path = os.path.dirname(__file__)
-    refine_model_path = os.path.join(base_path, '../../test/models', REFINE_MODEL_NAME)
-    score_model_path = os.path.join(base_path, '../../test/models', SCORE_MODEL_NAME)
+    refine_model_path = os.path.join(base_path, 'models', REFINE_MODEL_NAME)
+    score_model_path = os.path.join(base_path, 'models', SCORE_MODEL_NAME)
 
     # Generate Refine engine.
     refine_trtexec_args = [
@@ -113,8 +134,8 @@ def get_engines():
     """
     # Calculate correct model paths (relative to test directory).
     base_path = os.path.dirname(__file__)
-    refine_model_path = os.path.join(base_path, '../../test/models', REFINE_MODEL_NAME)
-    score_model_path = os.path.join(base_path, '../../test/models', SCORE_MODEL_NAME)
+    refine_model_path = os.path.join(base_path, 'models', REFINE_MODEL_NAME)
+    score_model_path = os.path.join(base_path, 'models', SCORE_MODEL_NAME)
 
     return {
         'refine_model_name': REFINE_MODEL_NAME,

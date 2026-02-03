@@ -147,6 +147,9 @@ def generate_test_description():
 class IsaacROSCenterPosePOLTest(IsaacROSBaseTest):
     filepath = pathlib.Path(os.path.dirname(__file__))
 
+    # Timeout for first successful inference (model loading + inference pipeline ready)
+    TIMEOUT_SEC = 300
+
     def test_pol(self):
 
         self.node._logger.info(
@@ -188,20 +191,24 @@ class IsaacROSCenterPosePOLTest(IsaacROSBaseTest):
             info_file = self.filepath / 'test_cases/shoe/camera_info.json'
             camera_info = JSONConversion.load_camera_info_from_json(info_file)
 
-            TIMEOUT = 60
-            end_time = time.time() + TIMEOUT
-            done = False
-
-            while time.time() < end_time:
+            # Publish images until we receive at least one detection response
+            self.node._logger.info(
+                'Publishing images until detection response received '
+                f'(timeout={self.TIMEOUT_SEC}s)')
+            start_time = time.time()
+            while 'centerpose/detections' not in received_messages:
+                if time.time() - start_time > self.TIMEOUT_SEC:
+                    self.fail('Timed out waiting for detection response')
                 camera_info_pub.publish(camera_info)
                 image_pub.publish(image)
-                rclpy.spin_once(self.node, timeout_sec=(0.1))
-                if 'centerpose/detections' in received_messages:
-                    done = True
-                    break
-            self.assertTrue(done, 'Timeout. Appropriate output not received')
-            self.node._logger.info('A message was successfully received')
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+                time.sleep(1)
 
+            self.node._logger.info(
+                f'Received detection response after {time.time() - start_time:.1f}s')
+
+            self.node._logger.info('Finished Isaac ROS CenterPose POL Test')
         finally:
             self.node.destroy_subscription(subs)
             self.node.destroy_publisher(image_pub)
+            self.node.destroy_publisher(camera_info_pub)

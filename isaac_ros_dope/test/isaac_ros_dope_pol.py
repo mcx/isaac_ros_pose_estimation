@@ -54,7 +54,7 @@ def generate_test_description():
         namespace=IsaacROSDopePOLTest.generate_namespace(),
         parameters=[{
             'model_file_path': os.path.dirname(__file__) +
-                '/../../test/models/' + MODEL_FILE_NAME,
+                '/models/' + MODEL_FILE_NAME,
             'engine_file_path': MODEL_PATH,
             'input_tensor_names': ['input_tensor'],
             'input_binding_names': ['input'],
