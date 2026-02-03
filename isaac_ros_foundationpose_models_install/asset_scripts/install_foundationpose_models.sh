@@ -19,7 +19,7 @@
 # Setup paths
 if [ -n "$TENSORRT_COMMAND" ]; then
   # If a custom tensorrt is used, ensure it's lib directory is added to the LD_LIBRARY_PATH
-  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$(readlink -f $(dirname ${TENSORRT_COMMAND})/../../../lib/x86_64-linux-gnu/)"
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$(readlink -f $(dirname ${TENSORRT_COMMAND})/../../../lib/$(uname -p)-linux-gnu/)"
 fi
 if [ -z "$ISAAC_ROS_WS" ] && [ -n "$ISAAC_ROS_ASSET_MODEL_PATH" ]; then
   ISAAC_ROS_WS="$(readlink -f $(dirname ${ISAAC_ROS_ASSET_MODEL_PATH})/../../..)"
@@ -47,10 +47,31 @@ SCORE_MODEL_ONNX="${MODELS_DIR}/score_model.onnx"
 SCORE_ENGINE_PATH="${MODELS_DIR}/score_trt_engine.plan"
 
 # Download refine model
-wget -nv -O "${REFINE_MODEL_ONNX}" "${REFINE_MODEL_URL}"
+isaac_ros_common_download_asset --url "${REFINE_MODEL_URL}" --output-path "${REFINE_MODEL_ONNX}" --cache-path "${ISAAC_ROS_FOUNDATIONPOSE_REFINE_MODEL}"
+REFINE_MODEL_DOWNLOAD_RESULT=$?
 
 # Download score model
-wget -nv -O "${SCORE_MODEL_ONNX}" "${SCORE_MODEL_URL}"
+isaac_ros_common_download_asset --url "${SCORE_MODEL_URL}" --output-path "${SCORE_MODEL_ONNX}" --cache-path "${ISAAC_ROS_FOUNDATIONPOSE_SCORE_MODEL}"
+SCORE_MODEL_DOWNLOAD_RESULT=$?
+
+if [[ -n ${ISAAC_ROS_ASSETS_TEST} ]]; then
+  if [[ ${REFINE_MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+    echo "ERROR: Remote REFINE model does not match cached model."
+    exit 1
+  fi
+  if [[ ${SCORE_MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+    echo "ERROR: Remote SCORE model does not match cached model."
+    exit 1
+  fi
+  exit 0
+elif [[ ${REFINE_MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+  echo "ERROR: Failed to download REFINE model."
+  exit 1
+elif [[ ${SCORE_MODEL_DOWNLOAD_RESULT} -ne 0 ]]; then
+  echo "ERROR: Failed to download SCORE model."
+  exit 1
+fi
+
 
 # Convert refine model to TensorRT engine
 ${TENSORRT_COMMAND:-/usr/src/tensorrt/bin/trtexec} \

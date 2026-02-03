@@ -30,7 +30,7 @@ def generate_launch_description():
     """Generate launch description for DOPE encoder->TensorRT->DOPE decoder."""
     DEFAULT_MODEL_FILE_NAME = 'dope_ketchup_pol.onnx'
     default_model_file_path = os.path.dirname(os.path.abspath(
-        __file__)) + '/../../test/models/' + DEFAULT_MODEL_FILE_NAME
+        __file__)) + '/../test/models/' + DEFAULT_MODEL_FILE_NAME
     launch_args = [
         DeclareLaunchArgument(
             'input_image_width',
