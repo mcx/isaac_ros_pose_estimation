@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES
-// Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,13 +15,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <cv_bridge/cv_bridge.hpp>
-#include <opencv2/opencv.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <rclcpp/time.hpp>
-#include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include "message_filters/subscriber.h"
 #include "message_filters/synchronizer.h"
@@ -29,14 +27,8 @@
 
 #include "isaac_ros_tensor_list_interfaces/msg/tensor_list.hpp"
 
-#include "isaac_ros_managed_nitros/managed_nitros_publisher.hpp"
-#include "isaac_ros_managed_nitros/managed_nitros_subscriber.hpp"
-#include "isaac_ros_managed_nitros/managed_nitros_message_filters_subscriber.hpp"
-
 #include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image_view.hpp"
-#include "isaac_ros_nitros_tensor_list_type/nitros_tensor_list.hpp"
-#include "isaac_ros_nitros_tensor_list_type/nitros_tensor_list_view.hpp"
+#include "isaac_ros_nitros/types/nitros_type_message_filter_traits.hpp"
 
 namespace nvidia
 {
@@ -56,48 +48,64 @@ public:
   explicit Selector(const rclcpp::NodeOptions & options)
   : Node("selector", options)
   {
-    // Create publishers for pose estimation
-    pose_estimation_image_pub_ = std::make_shared<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-          nvidia::isaac_ros::nitros::NitrosImage>>(
-      this, "pose_estimation/image",
-      nvidia::isaac_ros::nitros::nitros_image_rgb8_t::supported_type_name);
-    pose_estimation_depth_pub_ = std::make_shared<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-          nvidia::isaac_ros::nitros::NitrosImage>>(
-      this, "pose_estimation/depth_image",
-      nvidia::isaac_ros::nitros::nitros_image_32FC1_t::supported_type_name);
-    pose_estimation_segmenation_pub_ = std::make_shared<
-      nvidia::isaac_ros::nitros::ManagedNitrosPublisher<nvidia::isaac_ros::nitros::NitrosImage>>(
-      this, "pose_estimation/segmentation",
-      nvidia::isaac_ros::nitros::nitros_image_mono8_t::supported_type_name);
-    pose_estimation_camera_pub_ = this->create_publisher<
-      sensor_msgs::msg::CameraInfo>("pose_estimation/camera_info", 1);
+    // Pose-estimation outputs
+    pose_estimation_image_pub_ =
+      create_publisher<nvidia::isaac_ros::nitros::NitrosImage>("pose_estimation/image", 1);
+    pose_estimation_depth_pub_ =
+      create_publisher<nvidia::isaac_ros::nitros::NitrosImage>("pose_estimation/depth_image", 1);
+    pose_estimation_segmenation_pub_ =
+      create_publisher<nvidia::isaac_ros::nitros::NitrosImage>("pose_estimation/segmentation", 1);
+    pose_estimation_camera_pub_ =
+      create_publisher<sensor_msgs::msg::CameraInfo>("pose_estimation/camera_info", 1);
 
-    // Create publishers for tracking
-    tracking_image_pub_ = std::make_shared<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-          nvidia::isaac_ros::nitros::NitrosImage>>(
-      this, "tracking/image",
-      nvidia::isaac_ros::nitros::nitros_image_rgb8_t::supported_type_name);
-    tracking_depth_pub_ = std::make_shared<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-          nvidia::isaac_ros::nitros::NitrosImage>>(
-      this, "tracking/depth_image",
-      nvidia::isaac_ros::nitros::nitros_image_32FC1_t::supported_type_name);
-    tracking_pose_pub_ = this->create_publisher<
-      isaac_ros_tensor_list_interfaces::msg::TensorList>("tracking/pose_input", 1);
-    tracking_camera_pub_ = this->create_publisher<
-      sensor_msgs::msg::CameraInfo>("tracking/camera_info", 1);
+    // Tracking outputs
+    tracking_image_pub_ =
+      create_publisher<nvidia::isaac_ros::nitros::NitrosImage>("tracking/image", 1);
+    tracking_depth_pub_ =
+      create_publisher<nvidia::isaac_ros::nitros::NitrosImage>("tracking/depth_image", 1);
+    {
+      rclcpp::QoS pose_qos(1);
+      pose_qos.transient_local();
+      tracking_pose_pub_ = create_publisher<
+        isaac_ros_tensor_list_interfaces::msg::TensorList>("tracking/pose_input", pose_qos);
+    }
+    tracking_camera_pub_ =
+      create_publisher<sensor_msgs::msg::CameraInfo>("tracking/camera_info", 1);
 
-    // Exact Sync
+    // RT-DETR (gated; only forwarded while in kPoseEstimation)
+    rt_detr_image_pub_ =
+      create_publisher<nvidia::isaac_ros::nitros::NitrosImage>("rt_detr/image", 1);
+    rt_detr_camera_info_pub_ =
+      create_publisher<sensor_msgs::msg::CameraInfo>("rt_detr/camera_info", 1);
+
+    // Subscribers
     using namespace std::placeholders;
+    rgb_image_sub_ = std::make_shared<message_filters::Subscriber<
+          nvidia::isaac_ros::nitros::NitrosImage>>(this, "image");
+    depth_image_sub_ = std::make_shared<message_filters::Subscriber<
+          nvidia::isaac_ros::nitros::NitrosImage>>(this, "depth_image");
+    segmentation_sub_ = std::make_shared<message_filters::Subscriber<
+          nvidia::isaac_ros::nitros::NitrosImage>>(this, "segmentation");
+    camera_info_sub_ = std::make_shared<message_filters::Subscriber<
+          sensor_msgs::msg::CameraInfo>>(this, "camera_info");
+
+    // Pose-estimation sync (rgb + depth + segmentation + camera_info, runs at RT-DETR rate)
     exact_sync_ = std::make_shared<ExactSync>(
-      ExactPolicy(20), rgb_image_sub_, depth_image_sub_, segmentation_sub_,
-      camera_info_sub_);
+      ExactPolicy(20), *rgb_image_sub_, *depth_image_sub_, *segmentation_sub_,
+      *camera_info_sub_);
     exact_sync_->registerCallback(
       std::bind(&Selector::selectionCallback, this, _1, _2, _3, _4));
 
-    segmentation_sub_.subscribe(this, "segmentation");
-    rgb_image_sub_.subscribe(this, "image");
-    depth_image_sub_.subscribe(this, "depth_image");
-    camera_info_sub_.subscribe(this, "camera_info");
+    // Tracking sync (rgb + depth + camera_info, runs at full input rate)
+    tracking_sync_ = std::make_shared<TrackingSync>(
+      TrackingPolicy(20), *rgb_image_sub_, *depth_image_sub_, *camera_info_sub_);
+    tracking_sync_->registerCallback(
+      std::bind(&Selector::trackingCallback, this, _1, _2, _3));
+
+    rgb_image_sub_->registerCallback(
+      std::bind(&Selector::forwardImageToDetection, this, _1));
+    camera_info_sub_->registerCallback(
+      std::bind(&Selector::forwardCameraInfoToDetection, this, _1));
 
     // Create subscriber for pose input
     tracking_output_sub_ =
@@ -106,14 +114,24 @@ public:
     pose_estimation_output_sub_ =
       this->create_subscription<isaac_ros_tensor_list_interfaces::msg::TensorList>(
       "pose_estimation/pose_matrix_output", 1, std::bind(&Selector::poseResetCallback, this, _1));
+    reset_srv_ = this->create_service<std_srvs::srv::Trigger>(
+      "selector/reset", std::bind(&Selector::trackingResetCallback, this, _1, _2));
 
-    // reset period in ms after which pose estimation will be triggered
-    this->declare_parameter<int>("reset_period", 20000);
+    this->declare_parameter<int>("reset_period", 600000);
     this->get_parameter("reset_period", reset_period_);
+
+    this->declare_parameter<int>("tracking_timeout_ms", 1000);
+    this->get_parameter("tracking_timeout_ms", tracking_timeout_ms_);
+
+    last_tracking_msg_time_ = this->get_clock()->now();
 
     timer_ = this->create_wall_timer(
       std::chrono::milliseconds(reset_period_),
       std::bind(&Selector::timerCallback, this));
+
+    health_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(200),
+      std::bind(&Selector::healthCheck, this));
   }
 
   void selectionCallback(
@@ -123,80 +141,149 @@ public:
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info_msg)
   {
     std::unique_lock<std::mutex> lock(mutex_);
-    // Trigger next action
-    if (state_ == State::kPoseEstimation) {
-      // Publish all other messages except pose matrix to pose estimation
-      pose_estimation_image_pub_->publish(*image_msg);
-      pose_estimation_camera_pub_->publish(*camera_info_msg);
-      pose_estimation_depth_pub_->publish(*depth_msg);
-      pose_estimation_segmenation_pub_->publish(*segmentaion_msg);
-      state_ = State::kWaitingReset;
-    } else if (state_ == State::kTracking) {
-      // Publish all messages except segmentation to tracking
-      tracking_image_pub_->publish(*image_msg);
-      tracking_camera_pub_->publish(*camera_info_msg);
-      tracking_depth_pub_->publish(*depth_msg);
-      tracking_pose_pub_->publish(*tracking_pose_msg_);
+    if (state_ != State::kPoseEstimation) {
+      return;
     }
+    pose_estimation_image_pub_->publish(*image_msg);
+    pose_estimation_camera_pub_->publish(*camera_info_msg);
+    pose_estimation_depth_pub_->publish(*depth_msg);
+    pose_estimation_segmenation_pub_->publish(*segmentaion_msg);
+    state_ = State::kWaitingReset;
+    RCLCPP_INFO(this->get_logger(),
+      "[selector] dispatched pose-estimation frame, state->kWaitingReset");
+  }
+
+  void trackingCallback(
+    const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & image_msg,
+    const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & depth_msg,
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info_msg)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (state_ != State::kTracking) {
+      return;
+    }
+    tracking_image_pub_->publish(*image_msg);
+    tracking_camera_pub_->publish(*camera_info_msg);
+    tracking_depth_pub_->publish(*depth_msg);
+  }
+
+  void forwardImageToDetection(
+    const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & msg)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (state_ != State::kPoseEstimation) {
+      return;
+    }
+    rt_detr_image_pub_->publish(*msg);
+  }
+
+  void forwardCameraInfoToDetection(
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (state_ != State::kPoseEstimation) {
+      return;
+    }
+    rt_detr_camera_info_pub_->publish(*msg);
   }
 
   void poseForwardCallback(
     const isaac_ros_tensor_list_interfaces::msg::TensorList::ConstSharedPtr & tracking_output_msg)
   {
-    std::unique_lock<std::mutex> lock(pose_mutex_);
-    // Discard the stale pose messages from tracking to avoid drift
-    if (state_ == State::kTracking) {
-      tracking_pose_msg_ = tracking_output_msg;
+    last_tracking_msg_time_ = this->get_clock()->now();
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (state_ != State::kTracking) {
+        return;
+      }
     }
+    tracking_pose_pub_->publish(*tracking_output_msg);
   }
 
   void poseResetCallback(
     const isaac_ros_tensor_list_interfaces::msg::TensorList::ConstSharedPtr
     & pose_estimation_output_msg)
   {
-    std::unique_lock<std::mutex> lock(pose_mutex_);
-    tracking_pose_msg_ = pose_estimation_output_msg;
-    state_ = kTracking;
+    last_tracking_msg_time_ = this->get_clock()->now();
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      RCLCPP_INFO(this->get_logger(), "[selector] pose_estimation pose received, state->kTracking");
+      state_ = kTracking;
+    }
+    tracking_pose_pub_->publish(*pose_estimation_output_msg);
+  }
+
+  void trackingResetCallback(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    RCLCPP_INFO(this->get_logger(), "[selector] tracking reset requested, state->kPoseEstimation");
+    state_ = State::kPoseEstimation;
+    last_tracking_msg_time_ = this->get_clock()->now();
+    response->success = true;
+    response->message = "selector reset to pose estimation";
   }
 
   void timerCallback()
   {
     std::unique_lock<std::mutex> lock(mutex_);
-    state_ = State::kPoseEstimation;
+    if (state_ == State::kTracking) {
+      RCLCPP_INFO(this->get_logger(),
+        "[selector] periodic timer fired, state->kPoseEstimation");
+      state_ = State::kPoseEstimation;
+    }
+  }
+
+  void healthCheck()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (state_ == State::kPoseEstimation) {
+      return;
+    }
+    const auto elapsed_ms =
+      (this->get_clock()->now() - last_tracking_msg_time_).nanoseconds() / 1000000;
+    if (elapsed_ms > tracking_timeout_ms_) {
+      RCLCPP_WARN(this->get_logger(),
+        "[selector] no pose output for %ld ms (state=%d), state->kPoseEstimation",
+        elapsed_ms, static_cast<int>(state_));
+      state_ = State::kPoseEstimation;
+    }
   }
 
 private:
-  // Publishers for pose estimation
-  std::shared_ptr<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-      nvidia::isaac_ros::nitros::NitrosImage>> pose_estimation_image_pub_;
-  std::shared_ptr<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-      nvidia::isaac_ros::nitros::NitrosImage>> pose_estimation_depth_pub_;
-  std::shared_ptr<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-      nvidia::isaac_ros::nitros::NitrosImage>> pose_estimation_segmenation_pub_;
+  // Pose-estimation publishers
+  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr pose_estimation_image_pub_;
+  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr pose_estimation_depth_pub_;
+  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr
+    pose_estimation_segmenation_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr pose_estimation_camera_pub_;
 
-  // Publishers for tracking
-  std::shared_ptr<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-      nvidia::isaac_ros::nitros::NitrosImage>> tracking_image_pub_;
-  std::shared_ptr<nvidia::isaac_ros::nitros::ManagedNitrosPublisher<
-      nvidia::isaac_ros::nitros::NitrosImage>> tracking_depth_pub_;
+  // Tracking publishers
+  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr tracking_image_pub_;
+  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr tracking_depth_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr tracking_camera_pub_;
   rclcpp::Publisher<isaac_ros_tensor_list_interfaces::msg::TensorList>::SharedPtr
     tracking_pose_pub_;
 
+  // RT-DETR (gated)
+  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr rt_detr_image_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr rt_detr_camera_info_pub_;
+
   // Subscribers
-  nvidia::isaac_ros::nitros::message_filters::Subscriber<
-    nvidia::isaac_ros::nitros::NitrosImageView> rgb_image_sub_;
-  nvidia::isaac_ros::nitros::message_filters::Subscriber<
-    nvidia::isaac_ros::nitros::NitrosImageView> depth_image_sub_;
-  nvidia::isaac_ros::nitros::message_filters::Subscriber<
-    nvidia::isaac_ros::nitros::NitrosImageView> segmentation_sub_;
-  message_filters::Subscriber<sensor_msgs::msg::CameraInfo> camera_info_sub_;
+  std::shared_ptr<message_filters::Subscriber<nvidia::isaac_ros::nitros::NitrosImage>>
+  rgb_image_sub_;
+  std::shared_ptr<message_filters::Subscriber<nvidia::isaac_ros::nitros::NitrosImage>>
+  depth_image_sub_;
+  std::shared_ptr<message_filters::Subscriber<nvidia::isaac_ros::nitros::NitrosImage>>
+  segmentation_sub_;
+  std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>> camera_info_sub_;
 
   rclcpp::Subscription<isaac_ros_tensor_list_interfaces::msg::TensorList>::SharedPtr
     tracking_output_sub_;
   rclcpp::Subscription<isaac_ros_tensor_list_interfaces::msg::TensorList>::SharedPtr
     pose_estimation_output_sub_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_srv_;
 
   enum State
   {
@@ -207,7 +294,7 @@ private:
   // State
   State state_ = State::kPoseEstimation;
 
-  // Exact message sync policy
+  // Pose-estimation sync (rgb, depth, segmentation, camera_info)
   using ExactPolicy = message_filters::sync_policies::ExactTime<
     nvidia::isaac_ros::nitros::NitrosImage,
     nvidia::isaac_ros::nitros::NitrosImage,
@@ -216,12 +303,21 @@ private:
   using ExactSync = message_filters::Synchronizer<ExactPolicy>;
   std::shared_ptr<ExactSync> exact_sync_;
 
+  // Tracking sync (rgb, depth, camera_info - no segmentation)
+  using TrackingPolicy = message_filters::sync_policies::ExactTime<
+    nvidia::isaac_ros::nitros::NitrosImage,
+    nvidia::isaac_ros::nitros::NitrosImage,
+    sensor_msgs::msg::CameraInfo>;
+  using TrackingSync = message_filters::Synchronizer<TrackingPolicy>;
+  std::shared_ptr<TrackingSync> tracking_sync_;
+
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::TimerBase::SharedPtr health_timer_;
   std::mutex mutex_;
-  std::mutex pose_mutex_;
-  isaac_ros_tensor_list_interfaces::msg::TensorList::ConstSharedPtr tracking_pose_msg_;
+  rclcpp::Time last_tracking_msg_time_;
 
   int reset_period_;
+  int tracking_timeout_ms_;
 };
 
 }  // namespace foundationpose

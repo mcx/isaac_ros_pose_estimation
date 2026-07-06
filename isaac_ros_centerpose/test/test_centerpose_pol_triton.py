@@ -21,9 +21,12 @@ Basic Proof-Of-Life test for the Isaac ROS CenterPose Node.
 This test checks that an image can be encoder into a tensor, run through
 Triton using a CenterPose model, and the inference decoded into a series of poses.
 """
+import atexit
 import os
 import pathlib
+import shutil
 import subprocess
+import tempfile
 import time
 
 from ament_index_python.packages import get_package_share_directory
@@ -46,7 +49,16 @@ MODEL_DIR_PATH = LAUNCH_DIR_PATH + '/models'
 MODEL_NAME = 'centerpose_shoe'
 MODEL_VERSION = 1
 ONNX_FILE_PATH = f'{MODEL_DIR_PATH}/{MODEL_NAME}.onnx'
-MODEL_PATH = f'{MODEL_DIR_PATH}/{MODEL_NAME}/{MODEL_VERSION}/model.plan'
+
+# Write the generated TRT engine to a writable temp directory.
+# The runfiles/source tree may be read-only in remote Bazel execution.
+_TMP_MODEL_DIR = tempfile.mkdtemp(prefix='centerpose_models_')
+atexit.register(shutil.rmtree, _TMP_MODEL_DIR, ignore_errors=True)
+_TMP_ENGINE_DIR = f'{_TMP_MODEL_DIR}/{MODEL_NAME}/{MODEL_VERSION}'
+os.makedirs(_TMP_ENGINE_DIR, exist_ok=True)
+shutil.copy2(f'{MODEL_DIR_PATH}/{MODEL_NAME}/config.pbtxt',
+             f'{_TMP_MODEL_DIR}/{MODEL_NAME}/config.pbtxt')
+MODEL_PATH = f'{_TMP_ENGINE_DIR}/model.plan'
 
 
 @pytest.mark.rostest
@@ -57,7 +69,8 @@ def generate_test_description():
         f'--onnx={ONNX_FILE_PATH}',
         f'--saveEngine={MODEL_PATH}',
     ]
-    trt_exec_executable = '/usr/src/tensorrt/bin/trtexec'
+    trt_exec_executable = os.environ.get(
+        'TRTEXEC_PATH', '/usr/src/tensorrt/bin/trtexec')
 
     print('Running command:\n' +
           ' '.join([trt_exec_executable] + trt_exec_args))
@@ -90,6 +103,7 @@ def generate_test_description():
             'component_container_name': 'rclcpp_container',
             'dnn_image_encoder_namespace': IsaacROSCenterPosePOLTest.generate_namespace(),
             'tensor_output_topic': 'tensor_pub',
+            'tensor_name': 'input_tensor',
         }.items(),
     )
 
@@ -100,7 +114,7 @@ def generate_test_description():
         namespace=IsaacROSCenterPosePOLTest.generate_namespace(),
         parameters=[{
             'model_name': f'{MODEL_NAME}',
-            'model_repository_paths': [MODEL_DIR_PATH],
+            'model_repository_paths': [_TMP_MODEL_DIR],
             'input_tensor_names': ['input_tensor'],
             'input_binding_names': ['input'],
             'input_tensor_formats': ['nitros_tensor_list_nchw_rgb_f32'],

@@ -142,12 +142,25 @@ def generate_launch_description():
             'attach_to_shared_component_container': 'True',
             'component_container_name': 'dope_container',
             'dnn_image_encoder_namespace': 'dope_encoder',
-            'image_input_topic': '/image_rect',
+            'image_input_topic': '/image_rect_rgb',
             'camera_info_input_topic': '/camera_info_rect',
             'tensor_output_topic': '/tensor_pub',
+            'tensor_name': 'input_tensor',
             'keep_aspect_ratio': 'False'
         }.items(),
     )
+
+    image_format_converter_node = ComposableNode(
+        name='image_format_converter',
+        package='isaac_ros_image_proc',
+        plugin='nvidia::isaac_ros::image_proc::ImageFormatConverterNode',
+        parameters=[{
+            'encoding_desired': 'rgb8',
+        }],
+        remappings=[
+            ('image_raw', '/image_rect'),
+            ('image', '/image_rect_rgb'),
+        ])
 
     dope_inference_node = ComposableNode(
         name='dope_inference',
@@ -184,7 +197,8 @@ def generate_launch_description():
         namespace='',
         package='rclcpp_components',
         executable='component_container_mt',
-        composable_node_descriptions=[dope_inference_node, dope_decoder_node],
+        composable_node_descriptions=[
+            dope_inference_node, dope_decoder_node, image_format_converter_node],
         output='screen',
     )
 

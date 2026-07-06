@@ -69,30 +69,61 @@ def generate_test_description():
             'refine_iterations': 1,
             'fixed_axis_angles': ['x_-115', 'y_-12', 'z_-49'],
             'fixed_translations': ['x_-0.43', 'y_0.13', 'z_0.79'],
-
-            'refine_model_file_path':  os.path.dirname(__file__) +
-                '/models/' + engines['refine_model_name'],
-            'refine_engine_file_path': engines['refine_engine_path'],
             'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'refine_input_binding_names': ['input1', 'input2'],
-            'refine_output_tensor_names': ['output_tensor1', 'output_tensor2'],
-            'refine_output_binding_names': ['output1', 'output2'],
-
-            'score_model_file_path':  os.path.dirname(__file__) +
-                '/models/' + engines['score_model_name'],
-            'score_engine_file_path': engines['score_engine_path'],
             'score_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'score_input_binding_names': ['input1', 'input2'],
-            'score_output_tensor_names': ['output_tensor'],
-            'score_output_binding_names': ['output1'],
-        }])
+        }],
+        remappings=[])
+
+    refine_trt_node = ComposableNode(
+        name='refine_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        namespace=IsaacROSFoundationPosePOLTest.generate_namespace(),
+        parameters=[{
+            'engine_file_path': engines['refine_engine_path'],
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor1', 'output_tensor2'],
+            'output_binding_names': ['output1', 'output2'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 42,
+        }],
+        remappings=[
+            ('tensor_pub', 'refine/tensor_pub'),
+            ('tensor_sub', 'refine/tensor_sub'),
+        ])
+
+    score_trt_node = ComposableNode(
+        name='score_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        namespace=IsaacROSFoundationPosePOLTest.generate_namespace(),
+        parameters=[{
+            'engine_file_path': engines['score_engine_path'],
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor'],
+            'output_binding_names': ['output1'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 252,
+        }],
+        remappings=[
+            ('tensor_pub', 'score/tensor_pub'),
+            ('tensor_sub', 'score/tensor_sub'),
+        ])
 
     container = ComposableNodeContainer(
         name='foundationpose_container',
         namespace='',
         package='rclcpp_components',
         executable='component_container_mt',
-        composable_node_descriptions=[foundationpose_node],
+        composable_node_descriptions=[
+            refine_trt_node,
+            score_trt_node,
+            foundationpose_node,
+        ],
         output='screen',
     )
 

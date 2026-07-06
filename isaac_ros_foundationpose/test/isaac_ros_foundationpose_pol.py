@@ -67,30 +67,61 @@ def generate_test_description():
             'mesh_file_path': os.path.dirname(__file__) +
                 '/test_cases/foundationpose/' + MESH_FILE_NAME,
             'refine_iterations': 1,
-
-            'refine_model_file_path':  os.path.dirname(__file__) +
-                '/models/' + engines['refine_model_name'],
-            'refine_engine_file_path': engines['refine_engine_path'],
             'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'refine_input_binding_names': ['input1', 'input2'],
-            'refine_output_tensor_names': ['output_tensor1', 'output_tensor2'],
-            'refine_output_binding_names': ['output1', 'output2'],
-
-            'score_model_file_path':  os.path.dirname(__file__) +
-                '/models/' + engines['score_model_name'],
-            'score_engine_file_path': engines['score_engine_path'],
             'score_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'score_input_binding_names': ['input1', 'input2'],
-            'score_output_tensor_names': ['output_tensor'],
-            'score_output_binding_names': ['output1'],
-        }])
+        }],
+        remappings=[])
+
+    refine_trt_node = ComposableNode(
+        name='refine_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        namespace=IsaacROSFoundationPosePOLTest.generate_namespace(),
+        parameters=[{
+            'engine_file_path': engines['refine_engine_path'],
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor1', 'output_tensor2'],
+            'output_binding_names': ['output1', 'output2'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 42,
+        }],
+        remappings=[
+            ('tensor_pub', 'refine/tensor_pub'),
+            ('tensor_sub', 'refine/tensor_sub'),
+        ])
+
+    score_trt_node = ComposableNode(
+        name='score_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        namespace=IsaacROSFoundationPosePOLTest.generate_namespace(),
+        parameters=[{
+            'engine_file_path': engines['score_engine_path'],
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor'],
+            'output_binding_names': ['output1'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 252,
+        }],
+        remappings=[
+            ('tensor_pub', 'score/tensor_pub'),
+            ('tensor_sub', 'score/tensor_sub'),
+        ])
 
     container = ComposableNodeContainer(
         name='foundationpose_container',
         namespace='',
         package='rclcpp_components',
         executable='component_container_mt',
-        composable_node_descriptions=[foundationpose_node],
+        composable_node_descriptions=[
+            refine_trt_node,
+            score_trt_node,
+            foundationpose_node,
+        ],
         output='screen',
     )
 
@@ -194,6 +225,24 @@ class IsaacROSFoundationPosePOLTest(IsaacROSBaseTest):
 
             self.assertTrue(done, 'Timeout. Appropriate output not received')
             self.node._logger.info('A message was successfully received')
+            output_msg = received_messages['pose_estimation/output']
+            if output_msg.detections:
+                det = output_msg.detections[0]
+                self.node._logger.info(
+                    'Output pose: '
+                    f'position=({det.bbox.center.position.x:.6f}, '
+                    f'{det.bbox.center.position.y:.6f}, '
+                    f'{det.bbox.center.position.z:.6f}), '
+                    f'orientation_xyzw=({det.bbox.center.orientation.x:.6f}, '
+                    f'{det.bbox.center.orientation.y:.6f}, '
+                    f'{det.bbox.center.orientation.z:.6f}, '
+                    f'{det.bbox.center.orientation.w:.6f}), '
+                    f'bbox=({det.bbox.size.x:.6f}, '
+                    f'{det.bbox.size.y:.6f}, '
+                    f'{det.bbox.size.z:.6f})'
+                )
+            else:
+                self.node._logger.info('Output pose: no detections in Detection3DArray')
 
         finally:
             self.node.destroy_subscription(subs)

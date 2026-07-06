@@ -66,6 +66,7 @@ def generate_test_description():
             'input_image_height': '800',
             'network_image_width': '512',
             'network_image_height': '512',
+            'tensor_name': 'input_tensor',
             'image_mean': '[0.408, 0.447, 0.47]',
             'image_stddev': '[0.289, 0.274, 0.278]',
             'attach_to_shared_component_container': 'True',

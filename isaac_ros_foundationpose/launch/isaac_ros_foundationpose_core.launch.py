@@ -264,24 +264,54 @@ class IsaacROSFoundationPoseLaunchFragment(IsaacROSLaunchFragment):
                 ]
             ),
 
+            'refine_trt_node': ComposableNode(
+                name='refine_trt',
+                package='isaac_ros_tensor_rt',
+                plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+                parameters=[{
+                    'engine_file_path': refine_engine_file_path,
+                    'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+                    'input_binding_names': ['input1', 'input2'],
+                    'output_tensor_names': ['output_tensor1', 'output_tensor2'],
+                    'output_binding_names': ['output1', 'output2'],
+                    'force_engine_update': False,
+                    'verbose': False,
+                    'max_batch_size': 42,
+                }],
+                remappings=[
+                    ('tensor_pub', 'refine/tensor_pub'),
+                    ('tensor_sub', 'refine/tensor_sub'),
+                ]
+            ),
+
+            'score_trt_node': ComposableNode(
+                name='score_trt',
+                package='isaac_ros_tensor_rt',
+                plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+                parameters=[{
+                    'engine_file_path': score_engine_file_path,
+                    'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+                    'input_binding_names': ['input1', 'input2'],
+                    'output_tensor_names': ['output_tensor'],
+                    'output_binding_names': ['output1'],
+                    'force_engine_update': False,
+                    'verbose': False,
+                    'max_batch_size': 252,
+                }],
+                remappings=[
+                    ('tensor_pub', 'score/tensor_pub'),
+                    ('tensor_sub', 'score/tensor_sub'),
+                ]
+            ),
+
             'foundationpose_node': ComposableNode(
                 name='foundationpose_node',
                 package='isaac_ros_foundationpose',
                 plugin='nvidia::isaac_ros::foundationpose::FoundationPoseNode',
                 parameters=[{
                     'mesh_file_path': mesh_file_path,
-
-                    'refine_engine_file_path': refine_engine_file_path,
                     'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-                    'refine_input_binding_names': ['input1', 'input2'],
-                    'refine_output_tensor_names': ['output_tensor1', 'output_tensor2'],
-                    'refine_output_binding_names': ['output1', 'output2'],
-
-                    'score_engine_file_path': score_engine_file_path,
                     'score_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-                    'score_input_binding_names': ['input1', 'input2'],
-                    'score_output_tensor_names': ['output_tensor'],
-                    'score_output_binding_names': ['output1'],
                 }],
                 remappings=[
                     ('pose_estimation/depth_image', 'depth_image'),

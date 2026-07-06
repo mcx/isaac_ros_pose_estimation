@@ -62,7 +62,7 @@ def generate_test_description():
             'input_tensor_formats': ['nitros_tensor_list_nchw_rgb_f32'],
             'output_tensor_names': ['output'],
             'output_binding_names': ['output'],
-            'output_tensor_formats': ['nitros_tensor_list_nhwc_rgb_f32'],
+            'output_tensor_formats': ['nitros_tensor_list_nchw_rgb_f32'],
             'verbose': False,
             'force_engine_update': False,
         }])
@@ -79,6 +79,19 @@ def generate_test_description():
         remappings=[('belief_map_array', 'tensor_sub'),
                     ('dope/detections', 'detections')])
 
+    image_format_converter_node = ComposableNode(
+        name='image_format_converter',
+        package='isaac_ros_image_proc',
+        plugin='nvidia::isaac_ros::image_proc::ImageFormatConverterNode',
+        namespace=IsaacROSDopePOLTest.generate_namespace(),
+        parameters=[{
+            'encoding_desired': 'rgb8',
+        }],
+        remappings=[
+            ('image_raw', 'image'),
+            ('image', 'image_rgb'),
+        ])
+
     encoder_dir = get_package_share_directory('isaac_ros_dnn_image_encoder')
     dope_encoder_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -89,10 +102,12 @@ def generate_test_description():
             'input_image_height': '480',
             'network_image_width': '852',
             'network_image_height': '480',
+            'tensor_name': 'input_tensor',
             'attach_to_shared_component_container': 'True',
             'component_container_name': 'dope_container',
             'dnn_image_encoder_namespace': IsaacROSDopePOLTest.generate_namespace(),
             'tensor_output_topic': 'tensor_pub',
+            'image_input_topic': 'image_rgb',
         }.items(),
     )
 
@@ -101,7 +116,8 @@ def generate_test_description():
         namespace='',
         package='rclcpp_components',
         executable='component_container_mt',
-        composable_node_descriptions=[dope_inference_node, dope_decoder_node],
+        composable_node_descriptions=[
+            dope_inference_node, dope_decoder_node, image_format_converter_node],
         output='screen',
     )
 

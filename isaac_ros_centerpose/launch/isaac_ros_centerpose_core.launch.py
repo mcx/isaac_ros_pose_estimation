@@ -197,6 +197,7 @@ class IsaacROSCenterPoseLaunchFragment(IsaacROSLaunchFragment):
                     'image_input_topic': '/image_rect',
                     'camera_info_input_topic': '/camera_info_rect',
                     'tensor_output_topic': '/tensor_pub',
+                    'tensor_name': 'input_tensor',
                     'keep_aspect_ratio': 'False'
                 }.items(),
             ),

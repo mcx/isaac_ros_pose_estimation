@@ -49,6 +49,17 @@ class IsaacROSDopeLaunchFragment(IsaacROSLaunchFragment):
         map_peak_threshold = LaunchConfiguration('map_peak_threshold')
 
         return {
+            'image_format_converter_node': ComposableNode(
+                name='image_format_converter',
+                package='isaac_ros_image_proc',
+                plugin='nvidia::isaac_ros::image_proc::ImageFormatConverterNode',
+                parameters=[{
+                    'encoding_desired': 'rgb8',
+                }],
+                remappings=[
+                    ('image_raw', '/image_rect'),
+                    ('image', '/image_rect_rgb'),
+                ]),
             'dope_inference_node': ComposableNode(
                 name='dope_inference',
                 package='isaac_ros_tensor_rt',
@@ -142,7 +153,7 @@ class IsaacROSDopeLaunchFragment(IsaacROSLaunchFragment):
                 description='A  list of output tensor binding names (specified by model)'),
             'output_tensor_formats': DeclareLaunchArgument(
                 'output_tensor_formats',
-                default_value='["nitros_tensor_list_nhwc_rgb_f32"]',
+                default_value='["nitros_tensor_list_nchw_rgb_f32"]',
                 description='The nitros format of the output tensors'),
             'tensorrt_verbose': DeclareLaunchArgument(
                 'tensorrt_verbose',
@@ -178,9 +189,10 @@ class IsaacROSDopeLaunchFragment(IsaacROSLaunchFragment):
                     'attach_to_shared_component_container': 'True',
                     'component_container_name': '/isaac_ros_examples/container',
                     'dnn_image_encoder_namespace': 'dope_encoder',
-                    'image_input_topic': '/image_rect',
+                    'image_input_topic': '/image_rect_rgb',
                     'camera_info_input_topic': '/camera_info_rect',
                     'tensor_output_topic': '/tensor_pub',
+                    'tensor_name': 'input_tensor',
                     'keep_aspect_ratio': 'False'
                 }.items(),
             ),

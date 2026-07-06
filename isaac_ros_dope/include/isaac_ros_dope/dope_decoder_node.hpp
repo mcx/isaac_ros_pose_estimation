@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES
-// Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2021-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,15 +18,20 @@
 #ifndef ISAAC_ROS_DOPE__DOPE_DECODER_NODE_HPP_
 #define ISAAC_ROS_DOPE__DOPE_DECODER_NODE_HPP_
 
+#include <Eigen/Dense>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "geometry_msgs/msg/pose_array.hpp"
-#include "isaac_ros_tensor_list_interfaces/msg/tensor_list.hpp"
 #include "isaac_ros_nitros/nitros_node.hpp"
+#include "isaac_ros_nitros_tensor_list_type/nitros_tensor_list.hpp"
+#include "isaac_ros_tensor_list_interfaces/msg/tensor_list.hpp"
+#include "opencv2/core.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "tf2_ros/transform_broadcaster.h"
+#include "vision_msgs/msg/detection3_d_array.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
 
 namespace nvidia
 {
@@ -42,17 +47,19 @@ namespace dope
  *        Paper: See https://arxiv.org/abs/1809.10790
  *        Code: https://github.com/NVlabs/Deep_Object_Pose
  */
-class DopeDecoderNode : public nitros::NitrosNode
+class DopeDecoderNode : public rclcpp::Node
 {
 public:
-  explicit DopeDecoderNode(rclcpp::NodeOptions options = rclcpp::NodeOptions());
+  explicit DopeDecoderNode(const rclcpp::NodeOptions & options);
   ~DopeDecoderNode();
 
-  void postLoadGraphCallback() override;
-
-  void DopeDecoderDetectionCallback(const gxf_context_t context, nitros::NitrosTypeBase & msg);
-
 private:
+  void DopeDecoderDetectionCallback(
+    const nvidia::isaac_ros::nitros::NitrosTensorList::ConstSharedPtr & tensor_list,
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info);
+  bool UpdateCameraProperties(
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info);
+
   // The name of the YAML configuration file
   const std::string configuration_file_;
 
@@ -86,8 +93,24 @@ private:
   // The camera matrix used to capture the input images
   std::vector<double> camera_matrix_;
 
+  rclcpp::QoS input_qos_;
+  rclcpp::QoS output_qos_;
+
   // The transform broadcaster for when TF publishing for poses is enabled
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+  // CUDA resources
+  ::nvidia::isaac_ros::common::CudaStreamPtr cuda_stream_;
+
+  // Subscription to input NitrosTensorList messages
+  rclcpp::Subscription<nvidia::isaac_ros::nitros::NitrosTensorList>::SharedPtr nitros_sub_;
+
+  // Publisher for output Detection3DArray messages
+  rclcpp::Publisher<vision_msgs::msg::Detection3DArray>::SharedPtr detections_pub_;
+
+  // Parsed parameters
+  Eigen::Matrix<double, 3, 9> cuboid_3d_points_;
+  cv::Mat cv_camera_matrix_;
 };
 
 }  // namespace dope

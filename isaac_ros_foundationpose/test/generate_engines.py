@@ -48,10 +48,13 @@ def get_trtexec_path():
     """
     # Check if trtexec is in PATH
     trtexec_path = shutil.which('trtexec')
+    if os.environ.get('TENSORRT_COMMAND', None):
+        from python.runfiles import Runfiles
+        _bazel_runfiles = Runfiles.Create()
+        trtexec_path = _bazel_runfiles.Rlocation(os.environ['TENSORRT_COMMAND'])
+
     if trtexec_path:
         return trtexec_path
-
-    # Default to TensorRT installation path
     return '/usr/src/tensorrt/bin/trtexec'
 
 

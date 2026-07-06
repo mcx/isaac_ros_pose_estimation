@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES
-// Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,33 +15,27 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <filesystem>
-
-#include "ament_index_cpp/get_package_share_directory.hpp"
-#include "detection3_d_array_message/detection3_d_array_message.hpp"
-#include "geometry_msgs/msg/transform_stamped.hpp"
-#include "rclcpp/rclcpp.hpp"
-#include "tf2_ros/transform_broadcaster.h"
-
-#include "isaac_ros_common/qos.hpp"
-#include "isaac_ros_nitros_camera_info_type/nitros_camera_info.hpp"
-#include "isaac_ros_nitros_detection3_d_array_type/nitros_detection3_d_array.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros_tensor_list_type/nitros_tensor_list.hpp"
-
 #include "isaac_ros_foundationpose/foundationpose_node.hpp"
 
-// Helper function to convert StringList to readable string format
-std::string StringListToString(const StringList & string_list)
-{
-  std::string result = "[";
-  for (size_t i = 0; i < string_list.size(); ++i) {
-    if (i > 0) {result += ", ";}
-    result += "\"" + string_list[i] + "\"";
-  }
-  result += "]";
-  return result;
-}
+#include <algorithm>
+#include <chrono>
+#include <cinttypes>
+#include <condition_variable>
+#include <filesystem>
+#include <functional>
+#include <future>
+#include <string>
+#include <vector>
+
+#include "ament_index_cpp/get_package_share_directory.hpp"
+#include "isaac_ros_common/cuda_stream.hpp"
+#include "isaac_ros_common/qos.hpp"
+#include "isaac_ros_nitros_tensor_list_type/nitros_tensor_shape.hpp"
+#include "isaac_ros_nitros_tensor_list_type/nitros_data_type.hpp"
+#include "rcl_yaml_param_parser/parser.h"
+#include "rclcpp_components/register_node_macro.hpp"
+#include "std_msgs/msg/header.hpp"
+#include "foundationpose_sampling.cu.hpp"
 
 namespace nvidia
 {
@@ -50,211 +44,44 @@ namespace isaac_ros
 namespace foundationpose
 {
 
-using nvidia::gxf::optimizer::GraphIOGroupSupportedDataTypesInfoList;
-
-constexpr char INPUT_DEPTH_COMPONENT_KEY[] = "sync/depth_receiver";
-constexpr char INPUT_DEPTH_TENSOR_FORMAT[] = "nitros_image_32FC1";
-constexpr char INPUT_DEPTH_TOPIC_NAME[] = "pose_estimation/depth_image";
-
-constexpr char INPUT_RGB_IMAGE_COMPONENT_KEY[] = "sync/rgb_image_receiver";
-constexpr char INPUT_RGB_IMAGE_TENSOR_FORMAT[] = "nitros_image_rgb8";
-constexpr char INPUT_RGB_IMAGE_TOPIC_NAME[] = "pose_estimation/image";
-
-constexpr char INPUT_CAMERA_INFO_COMPONENT_KEY[] = "sync/camera_model_receiver";
-constexpr char INPUT_CAMERA_INFO_FORMAT[] = "nitros_camera_info";
-constexpr char INPUT_CAMERA_INFO_TOPIC_NAME[] = "pose_estimation/camera_info";
-
-constexpr char INPUT_SEGMENTATION_COMPONENT_KEY[] = "sync/mask_receiver";
-constexpr char INPUT_SEGMENTATION_FORMAT[] = "nitros_image_mono8";
-constexpr char INPUT_SEGMENTATION_TOPIC_NAME[] = "pose_estimation/segmentation";
-
-constexpr char OUTPUT_MATRIX_COMPONENT_KEY[] = "pose_matrix_sink/sink";
-constexpr char OUTPUT_MATRIX_FORMAT[] = "nitros_tensor_list_nchw";
-constexpr char OUTPUT_MATRIX_TOPIC_NAME[] = "pose_estimation/pose_matrix_output";
-
-constexpr char OUTPUT_POSE_COMPONENT_KEY[] = "pose_sink/sink";
-constexpr char OUTPUT_POSE_FORMAT[] = "nitros_detection3_d_array";
-constexpr char OUTPUT_POSE_TOPIC_NAME[] = "pose_estimation/output";
-
-constexpr char APP_YAML_FILENAME[] = "config/nitros_foundationpose_node.yaml";
-constexpr char PACKAGE_NAME[] = "isaac_ros_foundationpose";
-
-const std::vector<std::pair<std::string, std::string>> EXTENSIONS = {
-  {"isaac_ros_gxf", "gxf/lib/std/libgxf_std.so"},
-  {"isaac_ros_gxf", "gxf/lib/multimedia/libgxf_multimedia.so"},
-  {"isaac_ros_gxf", "gxf/lib/serialization/libgxf_serialization.so"},
-  {"isaac_ros_gxf", "gxf/lib/cuda/libgxf_cuda.so"},
-  {"gxf_isaac_depth_image_proc", "gxf/lib/libgxf_isaac_depth_image_proc.so"},
-  {"gxf_isaac_sgm", "gxf/lib/libgxf_isaac_sgm.so"},
-  {"gxf_isaac_messages", "gxf/lib/libgxf_isaac_messages.so"},
-  {"gxf_isaac_ros_messages", "gxf/lib/libgxf_isaac_ros_messages.so"},
-  {"gxf_isaac_tensor_rt", "gxf/lib/libgxf_isaac_tensor_rt.so"},
-  {"gxf_isaac_foundationpose", "gxf/lib/libgxf_isaac_foundationpose.so"},
-};
-
-const std::vector<std::string> PRESET_EXTENSION_SPEC_NAMES = {};
-const std::vector<std::string> EXTENSION_SPEC_FILENAMES = {
-  "config/isaac_ros_foundationpose_spec.yaml"
-};
-const std::vector<std::string> GENERATOR_RULE_FILENAMES = {"config/namespace_injector_rule.yaml"};
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-const nitros::NitrosPublisherSubscriberConfigMap CONFIG_MAP = {
-  {INPUT_DEPTH_COMPONENT_KEY,
-    {
-      .type = nitros::NitrosPublisherSubscriberType::NEGOTIATED,
-      .qos = rclcpp::QoS(10),
-      .compatible_data_format = INPUT_DEPTH_TENSOR_FORMAT,
-      .topic_name = INPUT_DEPTH_TOPIC_NAME,
-    }},
-  {INPUT_RGB_IMAGE_COMPONENT_KEY,
-    {
-      .type = nitros::NitrosPublisherSubscriberType::NEGOTIATED,
-      .qos = rclcpp::QoS(10),
-      .compatible_data_format = INPUT_RGB_IMAGE_TENSOR_FORMAT,
-      .topic_name = INPUT_RGB_IMAGE_TOPIC_NAME,
-    }},
-  {INPUT_CAMERA_INFO_COMPONENT_KEY,
-    {
-      .type = nitros::NitrosPublisherSubscriberType::NEGOTIATED,
-      .qos = rclcpp::QoS(10),
-      .compatible_data_format = INPUT_CAMERA_INFO_FORMAT,
-      .topic_name = INPUT_CAMERA_INFO_TOPIC_NAME,
-    }},
-  {INPUT_SEGMENTATION_COMPONENT_KEY,
-    {
-      .type = nitros::NitrosPublisherSubscriberType::NEGOTIATED,
-      .qos = rclcpp::QoS(10),
-      .compatible_data_format = INPUT_SEGMENTATION_FORMAT,
-      .topic_name = INPUT_SEGMENTATION_TOPIC_NAME,
-    }},
-  {OUTPUT_POSE_COMPONENT_KEY,
-    {
-      .type = nitros::NitrosPublisherSubscriberType::NEGOTIATED,
-      .qos = rclcpp::QoS(10),
-      .compatible_data_format = OUTPUT_POSE_FORMAT,
-      .topic_name = OUTPUT_POSE_TOPIC_NAME,
-      .frame_id_source_key = INPUT_RGB_IMAGE_COMPONENT_KEY,
-    }},
-  {OUTPUT_MATRIX_COMPONENT_KEY,
-    {
-      .type = nitros::NitrosPublisherSubscriberType::NEGOTIATED,
-      .qos = rclcpp::QoS(10),
-      .compatible_data_format = OUTPUT_MATRIX_FORMAT,
-      .topic_name = OUTPUT_MATRIX_TOPIC_NAME,
-      .frame_id_source_key = INPUT_RGB_IMAGE_COMPONENT_KEY,
-    }},
-};
-#pragma GCC diagnostic pop
-
 FoundationPoseNode::FoundationPoseNode(rclcpp::NodeOptions options)
-: nitros::NitrosNode(
-    options, APP_YAML_FILENAME, CONFIG_MAP, PRESET_EXTENSION_SPEC_NAMES, EXTENSION_SPEC_FILENAMES,
-    GENERATOR_RULE_FILENAMES, EXTENSIONS, PACKAGE_NAME),
+: rclcpp::Node("foundationpose_node", options),
   configuration_file_(
     declare_parameter<std::string>("configuration_file", "foundationpose_model_config.yaml")),
-  mesh_file_path_(declare_parameter<std::string>("mesh_file_path", "textured_simple.obj")),
-  min_depth_(declare_parameter<float>("min_depth", 0.1)),
-  max_depth_(declare_parameter<float>("max_depth", 4.0)),
-  refine_iterations_(declare_parameter<int>("refine_iterations", 1)),
-  symmetry_axes_(
-    declare_parameter<StringList>("symmetry_axes", StringList())),
-  symmetry_planes_(
-    declare_parameter<StringList>("symmetry_planes", StringList())),
-  fixed_axis_angles_(
-    declare_parameter<StringList>("fixed_axis_angles", StringList())),
-  fixed_translations_(
-    declare_parameter<StringList>("fixed_translations", StringList())),
-
-  refine_model_file_path_(
-    declare_parameter<std::string>("refine_model_file_path", "/tmp/refine_model.onnx")),
-  refine_engine_file_path_(
-    declare_parameter<std::string>("refine_engine_file_path", "/tmp/refine_trt_engine.plan")),
-  score_model_file_path_(
-    declare_parameter<std::string>("score_model_file_path", "/tmp/score_model.onnx")),
-  score_engine_file_path_(
-    declare_parameter<std::string>("score_engine_file_path", "/tmp/score_trt_engine.plan")),
-
-  refine_input_tensor_names_(
-    declare_parameter<StringList>("refine_input_tensor_names", StringList())),
-  refine_input_binding_names_(
-    declare_parameter<StringList>("refine_input_binding_names", StringList())),
-  score_input_tensor_names_(
-    declare_parameter<StringList>("score_input_tensor_names", StringList())),
-  score_input_binding_names_(
-    declare_parameter<StringList>("score_input_binding_names", StringList())),
-
-  refine_output_tensor_names_(
-    declare_parameter<StringList>("refine_output_tensor_names", StringList())),
-  refine_output_binding_names_(
-    declare_parameter<StringList>("refine_output_binding_names", StringList())),
-  score_output_tensor_names_(
-    declare_parameter<StringList>("score_output_tensor_names", StringList())),
-  score_output_binding_names_(
-    declare_parameter<StringList>("score_output_binding_names", StringList())),
-
-  discard_time_ms_(declare_parameter<int>("discard_msg_older_than_ms", 1000)),
-  discard_old_messages_(declare_parameter<bool>("discard_old_messages", false)),
-  pose_estimation_timeout_ms_(declare_parameter<int>("pose_estimation_timeout_ms", 5000)),
-  sync_threshold_(declare_parameter<int>("sync_threshold", 0)),
+  mesh_file_path_(declare_parameter<std::string>("mesh_file_path", "")),
+  refine_input_tensor_names_(declare_parameter<StringList>(
+      "refine_input_tensor_names", StringList{"input_tensor1", "input_tensor2"})),
+  score_input_tensor_names_(declare_parameter<StringList>(
+      "score_input_tensor_names", StringList{"input_tensor1", "input_tensor2"})),
+  min_depth_(declare_parameter<double>("min_depth", 0.1)),
+  max_depth_(declare_parameter<double>("max_depth", 2.0)),
   tf_frame_name_(declare_parameter<std::string>("tf_frame_name", "fp_object")),
-  debug_(declare_parameter<bool>("debug", false)),
-  debug_dir_(declare_parameter<std::string>("debug_dir", "/tmp/foundationpose"))
+  pose_estimation_timeout_ms_(declare_parameter<int64_t>("pose_estimation_timeout_ms", 5000)),
+  symmetry_axes_(declare_parameter<StringList>("symmetry_axes", StringList{})),
+  symmetry_planes_(declare_parameter<StringList>("symmetry_planes", StringList{})),
+  fixed_axis_angles_(declare_parameter<StringList>("fixed_axis_angles", StringList{})),
+  fixed_translations_(declare_parameter<StringList>("fixed_translations", StringList{}))
 {
-  RCLCPP_DEBUG(get_logger(), "[FoundationPoseNode] Constructor");
+  RCLCPP_INFO(get_logger(), "[FoundationPoseNode] Initializing GXF-free node");
 
-  // This function sets the QoS parameter for publishers and subscribers setup by this NITROS node
-  rclcpp::QoS depth_qos_ = ::isaac_ros::common::AddQosParameter(
-    *this, "DEFAULT",
-    "depth_qos");
-  rclcpp::QoS color_qos_ = ::isaac_ros::common::AddQosParameter(
-    *this, "DEFAULT",
-    "color_qos");
-  rclcpp::QoS color_info_qos_ = ::isaac_ros::common::AddQosParameter(
-    *this, "DEFAULT",
-    "color_info_qos");
-  rclcpp::QoS segmentation_qos_ = ::isaac_ros::common::AddQosParameter(
-    *this, "DEFAULT",
-    "segmentation_qos");
-  for (auto & config : config_map_) {
-    if (config.second.topic_name == INPUT_DEPTH_TOPIC_NAME) {
-      config.second.qos = depth_qos_;
-    }
-    if (config.second.topic_name == INPUT_RGB_IMAGE_TOPIC_NAME) {
-      config.second.qos = color_qos_;
-    }
-    if (config.second.topic_name == INPUT_CAMERA_INFO_TOPIC_NAME) {
-      config.second.qos = color_info_qos_;
-    }
-    if (config.second.topic_name == INPUT_SEGMENTATION_TOPIC_NAME) {
-      config.second.qos = segmentation_qos_;
-    }
-  }
-
-  // Add callback function for FoundationPose Detection3D array to broadcast to ROS TF tree
-  config_map_[OUTPUT_POSE_COMPONENT_KEY].callback = std::bind(
-    &FoundationPoseNode::FoundationPoseDetectionCallback, this, std::placeholders::_1,
-    std::placeholders::_2);
-
-  // Open configuration YAML file
   const std::string package_directory = ament_index_cpp::get_package_share_directory(
     "isaac_ros_foundationpose");
   std::filesystem::path yaml_path =
-    package_directory / std::filesystem::path("config") /
+    std::filesystem::path(package_directory) / std::filesystem::path("config") /
     std::filesystem::path(configuration_file_);
   if (!std::filesystem::exists(yaml_path)) {
-    RCLCPP_ERROR(this->get_logger(), "%s could not be found. Exiting.", yaml_path.string().c_str());
+    RCLCPP_ERROR(get_logger(), "%s could not be found. Exiting.", yaml_path.string().c_str());
     throw std::runtime_error("Parameter parsing failure.");
   }
 
-  // Parse parameters
-  rcl_params_t * foundationpose_params = rcl_yaml_node_struct_init(rcutils_get_default_allocator());
+  rcl_params_t * foundationpose_params =
+    rcl_yaml_node_struct_init(rcutils_get_default_allocator());
   rcl_parse_yaml_file(yaml_path.c_str(), foundationpose_params);
 
   rcl_variant_t * max_hypothesis = rcl_yaml_node_struct_get(
     "foundationpose", "max_hypothesis", foundationpose_params);
   if (!max_hypothesis->integer_value) {
-    RCLCPP_ERROR(this->get_logger(), "No max_hypothesis parameter found");
+    RCLCPP_ERROR(get_logger(), "No max_hypothesis parameter found");
     throw std::runtime_error("Parameter parsing failure.");
   }
   max_hypothesis_ = static_cast<uint32_t>(*max_hypothesis->integer_value);
@@ -262,15 +89,15 @@ FoundationPoseNode::FoundationPoseNode(rclcpp::NodeOptions options)
   rcl_variant_t * resized_image_width = rcl_yaml_node_struct_get(
     "foundationpose", "resized_image_width", foundationpose_params);
   if (!resized_image_width->integer_value) {
-    RCLCPP_ERROR(this->get_logger(), "No resized_image_width parameter found");
+    RCLCPP_ERROR(get_logger(), "No resized_image_width parameter found");
     throw std::runtime_error("Parameter parsing failure.");
   }
   resized_image_width_ = static_cast<uint32_t>(*resized_image_width->integer_value);
 
   rcl_variant_t * resized_image_height = rcl_yaml_node_struct_get(
     "foundationpose", "resized_image_height", foundationpose_params);
-  if (!resized_image_width->integer_value) {
-    RCLCPP_ERROR(this->get_logger(), "No resized_image_height parameter found");
+  if (!resized_image_height->integer_value) {
+    RCLCPP_ERROR(get_logger(), "No resized_image_height parameter found");
     throw std::runtime_error("Parameter parsing failure.");
   }
   resized_image_height_ = static_cast<uint32_t>(*resized_image_height->integer_value);
@@ -278,7 +105,7 @@ FoundationPoseNode::FoundationPoseNode(rclcpp::NodeOptions options)
   rcl_variant_t * refine_crop_ratio = rcl_yaml_node_struct_get(
     "foundationpose", "refine_crop_ratio", foundationpose_params);
   if (!refine_crop_ratio->double_value) {
-    RCLCPP_ERROR(this->get_logger(), "No refine_crop_ratio parameter found");
+    RCLCPP_ERROR(get_logger(), "No refine_crop_ratio parameter found");
     throw std::runtime_error("Parameter parsing failure.");
   }
   refine_crop_ratio_ = static_cast<float>(*refine_crop_ratio->double_value);
@@ -286,7 +113,7 @@ FoundationPoseNode::FoundationPoseNode(rclcpp::NodeOptions options)
   rcl_variant_t * score_crop_ratio = rcl_yaml_node_struct_get(
     "foundationpose", "score_crop_ratio", foundationpose_params);
   if (!score_crop_ratio->double_value) {
-    RCLCPP_ERROR(this->get_logger(), "No score_crop_ratio parameter found");
+    RCLCPP_ERROR(get_logger(), "No score_crop_ratio parameter found");
     throw std::runtime_error("Parameter parsing failure.");
   }
   score_crop_ratio_ = static_cast<float>(*score_crop_ratio->double_value);
@@ -294,354 +121,576 @@ FoundationPoseNode::FoundationPoseNode(rclcpp::NodeOptions options)
   rcl_variant_t * rot_normalizer = rcl_yaml_node_struct_get(
     "foundationpose", "rot_normalizer", foundationpose_params);
   if (!rot_normalizer->double_value) {
-    RCLCPP_ERROR(this->get_logger(), "No rot_normalizer parameter found");
+    RCLCPP_ERROR(get_logger(), "No rot_normalizer parameter found");
     throw std::runtime_error("Parameter parsing failure.");
   }
   rot_normalizer_ = static_cast<float>(*rot_normalizer->double_value);
 
   rcl_yaml_node_struct_fini(foundationpose_params);
 
+  refine_iterations_ = declare_parameter<int>("refine_iterations", 3);
+
+  initializePipeline();
+
+  rclcpp::QoS output_qos = ::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos");
+
+  rclcpp::QoS color_qos =
+    ::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "color_qos", 10);
+  rclcpp::QoS depth_qos =
+    ::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "depth_qos", 10);
+  rclcpp::QoS color_info_qos =
+    ::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "color_info_qos", 10);
+  rclcpp::QoS segmentation_qos =
+    ::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "segmentation_qos", 10);
+
+  rgb_sub_ = std::make_shared<message_filters::Subscriber<nitros::NitrosImage>>(
+    this, "pose_estimation/image", color_qos.get_rmw_qos_profile());
+  depth_sub_ = std::make_shared<message_filters::Subscriber<nitros::NitrosImage>>(
+    this, "pose_estimation/depth_image", depth_qos.get_rmw_qos_profile());
+  cam_info_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>>(
+    this, "pose_estimation/camera_info", color_info_qos.get_rmw_qos_profile());
+  mask_sub_ = std::make_shared<message_filters::Subscriber<nitros::NitrosImage>>(
+    this, "pose_estimation/segmentation", segmentation_qos.get_rmw_qos_profile());
+
+  // Synchronizer window matches the largest configured QoS depth so it can hold
+  // enough messages from every channel to find a sync point.
+  const size_t sync_depth = std::max(
+    {color_qos.depth(), depth_qos.depth(), color_info_qos.depth(),
+      segmentation_qos.depth()});
+  sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(
+    SyncPolicy(sync_depth), *rgb_sub_, *depth_sub_, *cam_info_sub_, *mask_sub_);
+  sync_->registerCallback(
+    std::bind(
+      &FoundationPoseNode::syncCallback, this,
+      std::placeholders::_1, std::placeholders::_2,
+      std::placeholders::_3, std::placeholders::_4));
+
+  // Output publishers
+  detection_pub_ = create_publisher<vision_msgs::msg::Detection3DArray>(
+    "pose_estimation/output", output_qos);
+  reset_client_ = create_client<std_srvs::srv::Trigger>("selector/reset");
+  tracking_switch_mesh_client_ =
+    create_client<isaac_ros_foundationpose::srv::SwitchMesh>("tracking/switch_mesh");
+  rclcpp::PublisherOptions pose_pub_options;
+  pose_pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  pose_matrix_pub_ = create_publisher<nitros::NitrosTensorList>(
+    "pose_estimation/pose_matrix_output", output_qos, pose_pub_options);
+
+  // TRT topic publishers (FP node -> TRT nodes). Plain rclcpp publishers; the
+  // NitrosTensorList type adapter still gives zero-copy GPU delivery to
+  // TensorRTNode.
+  rclcpp::PublisherOptions trt_pub_options;
+  trt_pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  refine_pub_ = create_publisher<nitros::NitrosTensorList>(
+    "refine/tensor_pub", rclcpp::QoS(1), trt_pub_options);
+  score_pub_ = create_publisher<nitros::NitrosTensorList>(
+    "score/tensor_pub", rclcpp::QoS(1), trt_pub_options);
+
+  // Dedicated reentrant callback group for TRT result subscribers so their
+  // dispatch is not blocked behind syncCallback / parameter callbacks on the
+  // default callback group when the executor is busy.
+  trt_callback_group_ = create_callback_group(
+    rclcpp::CallbackGroupType::Reentrant);
+  rclcpp::SubscriptionOptions trt_sub_options;
+  trt_sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  trt_sub_options.callback_group = trt_callback_group_;
+
+  refine_sub_ = create_subscription<nitros::NitrosTensorList>(
+    "refine/tensor_sub", rclcpp::QoS(1),
+    std::bind(&FoundationPoseNode::onRefineResult, this, std::placeholders::_1),
+    trt_sub_options);
+  score_sub_ = create_subscription<nitros::NitrosTensorList>(
+    "score/tensor_sub", rclcpp::QoS(1),
+    std::bind(&FoundationPoseNode::onScoreResult, this, std::placeholders::_1),
+    trt_sub_options);
+
+  watchdog_timer_ = create_wall_timer(
+    std::chrono::milliseconds(pose_estimation_timeout_ms_),
+    [this]() {
+      if (processing_.load()) {
+        RCLCPP_WARN(get_logger(), "[FoundationPoseNode] Processing timeout, releasing gate");
+        processing_.store(false);
+      }
+    });
+
+  tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
   param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>(this);
-  mesh_file_path_param_cb_handle_ = param_subscriber_->add_parameter_callback(
+  mesh_file_path_cb_ = param_subscriber_->add_parameter_callback(
     "mesh_file_path",
-    std::bind(&FoundationPoseNode::UpdateMeshFilePathCallback, this, std::placeholders::_1));
-  tf_frame_name_param_cb_handle_ = param_subscriber_->add_parameter_callback(
+    [this](const rclcpp::Parameter & param) {
+      const auto new_mesh_file_path = param.as_string();
+      if (reset_client_->service_is_ready()) {
+        auto future = reset_client_->async_send_request(
+          std::make_shared<std_srvs::srv::Trigger::Request>());
+        if (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+          RCLCPP_WARN(
+            get_logger(),
+            "[FoundationPoseNode] selector/reset service timed out; continuing mesh switch");
+        } else if (!future.get()->success) {
+          RCLCPP_WARN(
+            get_logger(),
+            "[FoundationPoseNode] selector/reset failed; continuing mesh switch");
+        }
+      } else {
+        RCLCPP_DEBUG(
+          get_logger(),
+          "[FoundationPoseNode] selector/reset service is not ready; "
+          "selector may wait for timeout");
+      }
+      {
+        std::lock_guard<std::mutex> lock(mesh_mutex_);
+        mesh_file_path_ = new_mesh_file_path;
+        mesh_loader_->tryReload(mesh_file_path_);
+      }
+      if (tracking_switch_mesh_client_->service_is_ready()) {
+        auto request = std::make_shared<isaac_ros_foundationpose::srv::SwitchMesh::Request>();
+        request->mesh_file_path = new_mesh_file_path;
+        auto future = tracking_switch_mesh_client_->async_send_request(request);
+        if (future.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready) {
+          RCLCPP_WARN(
+            get_logger(),
+            "[FoundationPoseNode] tracking/switch_mesh service timed out; "
+            "tracking mesh may be stale");
+        } else {
+          auto response = future.get();
+          if (!response->success) {
+            RCLCPP_WARN(
+              get_logger(), "[FoundationPoseNode] tracking/switch_mesh failed: %s",
+              response->message.c_str());
+          }
+        }
+      } else {
+        RCLCPP_DEBUG(
+          get_logger(),
+          "[FoundationPoseNode] tracking/switch_mesh service is not ready; "
+          "tracking mesh was not updated");
+      }
+    });
+  tf_frame_name_cb_ = param_subscriber_->add_parameter_callback(
     "tf_frame_name",
-    std::bind(&FoundationPoseNode::UpdateTfFrameNameCallback, this, std::placeholders::_1));
-
-  // Register parameter callbacks for constraint parameters
-  fixed_translations_param_cb_handle_ = param_subscriber_->add_parameter_callback(
+    [this](const rclcpp::Parameter & param) {
+      std::lock_guard<std::mutex> lock(param_mutex_);
+      tf_frame_name_ = param.as_string();
+    });
+  fixed_translations_cb_ = param_subscriber_->add_parameter_callback(
     "fixed_translations",
-    std::bind(&FoundationPoseNode::UpdateFixedTranslationsCallback, this, std::placeholders::_1));
-
-  fixed_axis_angles_param_cb_handle_ = param_subscriber_->add_parameter_callback(
+    [this](const rclcpp::Parameter & param) {
+      std::lock_guard<std::mutex> lock(param_mutex_);
+      fixed_translations_ = param.as_string_array();
+      PoseSamplerParams p = {};
+      p.max_hypothesis = max_hypothesis_;
+      p.min_depth = min_depth_;
+      p.symmetry_axes = symmetry_axes_;
+      p.symmetry_planes = symmetry_planes_;
+      p.fixed_axis_angles = fixed_axis_angles_;
+      p.fixed_translations = fixed_translations_;
+      sampler_->updateParams(p);
+    });
+  fixed_axis_angles_cb_ = param_subscriber_->add_parameter_callback(
     "fixed_axis_angles",
-    std::bind(&FoundationPoseNode::UpdateFixedAxisAnglesCallback, this, std::placeholders::_1));
-
-  symmetry_axes_param_cb_handle_ = param_subscriber_->add_parameter_callback(
+    [this](const rclcpp::Parameter & param) {
+      std::lock_guard<std::mutex> lock(param_mutex_);
+      fixed_axis_angles_ = param.as_string_array();
+      PoseSamplerParams p = {};
+      p.max_hypothesis = max_hypothesis_;
+      p.min_depth = min_depth_;
+      p.symmetry_axes = symmetry_axes_;
+      p.symmetry_planes = symmetry_planes_;
+      p.fixed_axis_angles = fixed_axis_angles_;
+      p.fixed_translations = fixed_translations_;
+      sampler_->updateParams(p);
+    });
+  symmetry_axes_cb_ = param_subscriber_->add_parameter_callback(
     "symmetry_axes",
-    std::bind(&FoundationPoseNode::UpdateSymmetryAxesCallback, this, std::placeholders::_1));
-
-  symmetry_planes_param_cb_handle_ = param_subscriber_->add_parameter_callback(
+    [this](const rclcpp::Parameter & param) {
+      std::lock_guard<std::mutex> lock(param_mutex_);
+      symmetry_axes_ = param.as_string_array();
+      PoseSamplerParams p = {};
+      p.max_hypothesis = max_hypothesis_;
+      p.min_depth = min_depth_;
+      p.symmetry_axes = symmetry_axes_;
+      p.symmetry_planes = symmetry_planes_;
+      p.fixed_axis_angles = fixed_axis_angles_;
+      p.fixed_translations = fixed_translations_;
+      sampler_->updateParams(p);
+    });
+  symmetry_planes_cb_ = param_subscriber_->add_parameter_callback(
     "symmetry_planes",
-    std::bind(&FoundationPoseNode::UpdateSymmetryPlanesCallback, this, std::placeholders::_1));
+    [this](const rclcpp::Parameter & param) {
+      std::lock_guard<std::mutex> lock(param_mutex_);
+      symmetry_planes_ = param.as_string_array();
+      PoseSamplerParams p = {};
+      p.max_hypothesis = max_hypothesis_;
+      p.min_depth = min_depth_;
+      p.symmetry_axes = symmetry_axes_;
+      p.symmetry_planes = symmetry_planes_;
+      p.fixed_axis_angles = fixed_axis_angles_;
+      p.fixed_translations = fixed_translations_;
+      sampler_->updateParams(p);
+    });
 
-  registerSupportedType<nvidia::isaac_ros::nitros::NitrosCameraInfo>();
-  registerSupportedType<nvidia::isaac_ros::nitros::NitrosImage>();
-  registerSupportedType<nvidia::isaac_ros::nitros::NitrosDetection3DArray>();
-  registerSupportedType<nvidia::isaac_ros::nitros::NitrosTensorList>();
-
-  startNitrosNode();
+  RCLCPP_INFO(get_logger(), "[FoundationPoseNode] Initialization complete");
 }
 
-FoundationPoseNode::~FoundationPoseNode() = default;
-
-void FoundationPoseNode::postLoadGraphCallback()
+FoundationPoseNode::~FoundationPoseNode()
 {
-  RCLCPP_DEBUG(get_logger(), "[FoundationPoseNode] postLoadGraphCallback().");
+  if (processing_thread_.joinable()) {
+    processing_thread_.join();
+  }
+  renderer_.reset();
+  score_renderer_.reset();
+  sampler_.reset();
+  decoder_.reset();
+  transformer_.reset();
+  mesh_loader_.reset();
+  if (pc_gpu_) {cudaFree(pc_gpu_);}
+  if (all_poses_gpu_) {cudaFree(all_poses_gpu_);}
+  // Pools self-destroy in their dtors.
+  if (cuda_stream_) {cudaStreamDestroy(cuda_stream_);}
+}
 
-  // Set the model configuration file path from parameter
-  getNitrosContext().setParameterUInt32(
-    "sampling", "nvidia::isaac_ros::FoundationposeSampling", "max_hypothesis",
-    max_hypothesis_);
+void FoundationPoseNode::initializePipeline()
+{
+  cudaStreamCreate(&cuda_stream_);
 
-  getNitrosContext().setParameterUInt32(
-    "render", "nvidia::isaac_ros::FoundationposeRender", "resized_image_width",
-    resized_image_width_);
-
-  getNitrosContext().setParameterUInt32(
-    "render_score", "nvidia::isaac_ros::FoundationposeRender", "resized_image_width",
-    resized_image_width_);
-
-  getNitrosContext().setParameterUInt32(
-    "render", "nvidia::isaac_ros::FoundationposeRender", "resized_image_height",
-    resized_image_height_);
-
-  getNitrosContext().setParameterUInt32(
-    "render_score", "nvidia::isaac_ros::FoundationposeRender", "resized_image_height",
-    resized_image_height_);
-
-  getNitrosContext().setParameterFloat32(
-    "render", "nvidia::isaac_ros::FoundationposeRender", "crop_ratio", refine_crop_ratio_);
-
-  getNitrosContext().setParameterFloat32(
-    "render_score", "nvidia::isaac_ros::FoundationposeRender", "crop_ratio", score_crop_ratio_);
-
-  getNitrosContext().setParameterFloat32(
-    "transform", "nvidia::isaac_ros::FoundationposeTransformation", "rot_normalizer",
-    rot_normalizer_);
-
-  // Set the mesh path from parameter
-  getNitrosContext().setParameterStr(
-    "utils", "nvidia::isaac_ros::MeshStorage", "mesh_file_path", mesh_file_path_);
-
-  // Set the depth threshold
-  getNitrosContext().setParameterFloat32(
-    "render", "nvidia::isaac_ros::FoundationposeRender", "min_depth", min_depth_);
-
-  getNitrosContext().setParameterFloat32(
-    "render_score", "nvidia::isaac_ros::FoundationposeRender", "min_depth", min_depth_);
-
-  getNitrosContext().setParameterFloat32(
-    "render", "nvidia::isaac_ros::FoundationposeRender", "max_depth", max_depth_);
-
-  getNitrosContext().setParameterFloat32(
-    "render_score", "nvidia::isaac_ros::FoundationposeRender", "max_depth", max_depth_);
-
-  getNitrosContext().setParameterFloat32(
-    "sampling", "nvidia::isaac_ros::FoundationposeSampling", "min_depth", min_depth_);
-
-  // Set the refine iterations
-  getNitrosContext().setParameterInt32(
-    "render", "nvidia::isaac_ros::FoundationposeRender", "refine_iterations",
-    refine_iterations_);
-  getNitrosContext().setParameterInt32(
-    "transform", "nvidia::isaac_ros::FoundationposeTransformation", "refine_iterations",
-    refine_iterations_);
-
-  // Set the refine network TensorRT configs from parameter
-  getNitrosContext().setParameterStr(
-    "refine_inference", "nvidia::gxf::TensorRtInference", "model_file_path",
-    refine_model_file_path_);
-
-  getNitrosContext().setParameterStr(
-    "refine_inference", "nvidia::gxf::TensorRtInference", "engine_file_path",
-    refine_engine_file_path_);
-
-  getNitrosContext().setParameter1DStrVector(
-    "refine_inference", "nvidia::gxf::TensorRtInference", "input_tensor_names",
-    refine_input_tensor_names_);
-
-  getNitrosContext().setParameter1DStrVector(
-    "refine_inference", "nvidia::gxf::TensorRtInference", "input_binding_names",
-    refine_input_binding_names_);
-
-  getNitrosContext().setParameter1DStrVector(
-    "refine_inference", "nvidia::gxf::TensorRtInference", "output_tensor_names",
-    refine_output_tensor_names_);
-
-  getNitrosContext().setParameter1DStrVector(
-    "refine_inference", "nvidia::gxf::TensorRtInference", "output_binding_names",
-    refine_output_binding_names_);
-
-
-  // Set the score network TensorRT configs from parameter
-  getNitrosContext().setParameterStr(
-    "score_inference", "nvidia::gxf::TensorRtInference", "model_file_path",
-    score_model_file_path_);
-
-  getNitrosContext().setParameterStr(
-    "score_inference", "nvidia::gxf::TensorRtInference", "engine_file_path",
-    score_engine_file_path_);
-
-  getNitrosContext().setParameter1DStrVector(
-    "score_inference", "nvidia::gxf::TensorRtInference", "input_tensor_names",
-    score_input_tensor_names_);
-
-  getNitrosContext().setParameter1DStrVector(
-    "score_inference", "nvidia::gxf::TensorRtInference", "input_binding_names",
-    score_input_binding_names_);
-
-  getNitrosContext().setParameter1DStrVector(
-    "score_inference", "nvidia::gxf::TensorRtInference", "output_tensor_names",
-    score_output_tensor_names_);
-
-  getNitrosContext().setParameter1DStrVector(
-    "score_inference", "nvidia::gxf::TensorRtInference", "output_binding_names",
-    score_output_binding_names_);
-
-  getNitrosContext().setParameterBool(
-    "sync", "nvidia::isaac_ros::FoundationPoseSynchronization", "discard_old_messages",
-    discard_old_messages_
-  );
-  getNitrosContext().setParameterInt64(
-    "sync", "nvidia::isaac_ros::FoundationPoseSynchronization", "discard_time_ms",
-    discard_time_ms_
-  );
-  getNitrosContext().setParameterInt64(
-    "sync", "nvidia::isaac_ros::FoundationPoseSynchronization", "pose_estimation_timeout_ms",
-    pose_estimation_timeout_ms_
-  );
-  getNitrosContext().setParameterInt64(
-    "sync", "nvidia::isaac_ros::FoundationPoseSynchronization", "sync_threshold",
-    sync_threshold_
-  );
-
-  // Set symmetry planes for backward compatibility if any
-  if (symmetry_planes_.size() > 0) {
-    getNitrosContext().setParameter1DStrVector(
-      "sampling", "nvidia::isaac_ros::FoundationposeSampling", "symmetry_planes",
-      symmetry_planes_);
+  mesh_loader_ = std::make_unique<MeshLoader>(cuda_stream_);
+  if (!mesh_file_path_.empty()) {
+    mesh_loader_->load(mesh_file_path_);
   }
 
-  if (symmetry_axes_.size() > 0) {
-    getNitrosContext().setParameter1DStrVector(
-      "sampling", "nvidia::isaac_ros::FoundationposeSampling", "symmetry_axes",
-      symmetry_axes_);
+  PoseSamplerParams sampler_params;
+  sampler_params.max_hypothesis = max_hypothesis_;
+  sampler_params.min_depth = min_depth_;
+  sampler_params.symmetry_axes = symmetry_axes_;
+  sampler_params.symmetry_planes = symmetry_planes_;
+  sampler_params.fixed_axis_angles = fixed_axis_angles_;
+  sampler_params.fixed_translations = fixed_translations_;
+  sampler_ = std::make_unique<PoseSampler>(sampler_params, cuda_stream_);
+
+  PoseRendererParams render_params;
+  render_params.crop_ratio = refine_crop_ratio_;
+  render_params.min_depth = min_depth_;
+  render_params.max_depth = max_depth_;
+  render_params.resized_height = resized_image_height_;
+  render_params.resized_width = resized_image_width_;
+  renderer_ = std::make_unique<PoseRenderer>(render_params, cuda_stream_);
+
+  PoseRendererParams score_render_params = render_params;
+  score_render_params.crop_ratio = score_crop_ratio_;
+  score_renderer_ = std::make_unique<PoseRenderer>(score_render_params, cuda_stream_);
+
+  transformer_ = std::make_unique<PoseTransformer>(rot_normalizer_, cuda_stream_);
+  decoder_ = std::make_unique<PoseDecoder>(cuda_stream_);
+
+  size_t poses_bytes = static_cast<size_t>(max_hypothesis_) * 16 * sizeof(float);
+  CHECK_CUDA_ERROR(cudaMalloc(&all_poses_gpu_, poses_bytes), "malloc all_poses_gpu");
+
+  // Initialize NITROS-tensor pools. Each tensor has shape [N, H, W, 6] floats
+  // (rendered RGB+XYZ or observed RGB+XYZ concatenated as 6 channels).
+  const uint32_t H = resized_image_height_;
+  const uint32_t W = resized_image_width_;
+  constexpr uint32_t kChan = 6;
+  const int32_t kNumBatches = 6;
+  const uint32_t refine_batch = static_cast<uint32_t>(max_hypothesis_) / kNumBatches;
+  const size_t refine_block_bytes = refine_batch * H * W * kChan * sizeof(float);
+  const size_t score_block_bytes =
+    static_cast<size_t>(max_hypothesis_) * H * W * kChan * sizeof(float);
+
+  // 8 blocks: 2 per render step plus recycle headroom (QoS-1 TRT link).
+  if (refine_pool_.create(refine_block_bytes, 8,
+      nitros::CUDAMemoryPool::MemoryType::Device) != cudaSuccess)
+  {
+    throw std::runtime_error("[FoundationPoseNode] refine pool create failed");
+  }
+  // 4 blocks: in-flight frame plus recycle headroom.
+  if (score_pool_.create(score_block_bytes, 4,
+      nitros::CUDAMemoryPool::MemoryType::Device) != cudaSuccess)
+  {
+    throw std::runtime_error("[FoundationPoseNode] score pool create failed");
+  }
+  if (pose_matrix_pool_.create(16 * sizeof(float), 4,
+      nitros::CUDAMemoryPool::MemoryType::Device) != cudaSuccess)
+  {
+    throw std::runtime_error("[FoundationPoseNode] pose_matrix pool create failed");
   }
 
-  // Set fixed axis angle constraints if any
-  if (fixed_axis_angles_.size() > 0) {
-    getNitrosContext().setParameter1DStrVector(
-      "sampling", "nvidia::isaac_ros::FoundationposeSampling", "fixed_axis_angles",
-      fixed_axis_angles_);
+  RCLCPP_INFO(get_logger(),
+    "[FoundationPoseNode] Pipeline initialized "
+    "(refine_pool=%zu MiB×8, score_pool=%zu MiB×4)",
+    refine_block_bytes >> 20, score_block_bytes >> 20);
+}
+
+// --- Blocking TRT call helpers ---
+
+void FoundationPoseNode::onRefineResult(
+  const nitros::NitrosTensorList::ConstSharedPtr & result)
+{
+  std::lock_guard<std::mutex> lock(refine_mutex_);
+  refine_result_ = *result;
+  refine_result_ready_ = true;
+  refine_cv_.notify_one();
+}
+
+void FoundationPoseNode::onScoreResult(
+  const nitros::NitrosTensorList::ConstSharedPtr & result)
+{
+  std::lock_guard<std::mutex> lock(score_mutex_);
+  score_result_ = *result;
+  score_result_ready_ = true;
+  score_cv_.notify_one();
+}
+
+nitros::NitrosTensorList FoundationPoseNode::callRefineTRT(
+  nitros::NitrosTensorList input)
+{
+  constexpr auto kTimeout = std::chrono::seconds(5);
+  std::unique_lock<std::mutex> lock(refine_mutex_);
+  refine_result_ready_ = false;
+  refine_pub_->publish(std::move(input));
+  if (!refine_cv_.wait_for(lock, kTimeout, [this] {return refine_result_ready_;})) {
+    RCLCPP_ERROR(get_logger(),
+      "Refine TRT timed out after %" PRId64 "s; check that the TensorRT node is running",
+      static_cast<int64_t>(kTimeout.count()));
+    return nitros::NitrosTensorList(cuda_stream_);
   }
+  return std::move(refine_result_);
+}
 
-  // Set the fixed translations parameter
-  if (fixed_translations_.size() > 0) {
-    getNitrosContext().setParameter1DStrVector(
-      "sampling", "nvidia::isaac_ros::FoundationposeSampling", "fixed_translations",
-      fixed_translations_);
+nitros::NitrosTensorList FoundationPoseNode::callScoreTRT(
+  nitros::NitrosTensorList input)
+{
+  constexpr auto kTimeout = std::chrono::seconds(5);
+  std::unique_lock<std::mutex> lock(score_mutex_);
+  score_result_ready_ = false;
+  score_pub_->publish(std::move(input));
+  if (!score_cv_.wait_for(lock, kTimeout, [this] {return score_result_ready_;})) {
+    RCLCPP_ERROR(get_logger(),
+      "Score TRT timed out after %" PRId64 "s; check that the TensorRT node is running",
+      static_cast<int64_t>(kTimeout.count()));
+    return nitros::NitrosTensorList(cuda_stream_);
   }
-
-  // Set debug mode
-  getNitrosContext().setParameterBool(
-    "render", "nvidia::isaac_ros::FoundationposeRender", "debug",
-    debug_);
-  getNitrosContext().setParameterBool(
-    "render_score", "nvidia::isaac_ros::FoundationposeRender", "debug",
-    debug_);
-  getNitrosContext().setParameterStr(
-    "render", "nvidia::isaac_ros::FoundationposeRender", "debug_dir",
-    debug_dir_);
-  getNitrosContext().setParameterStr(
-    "render_score", "nvidia::isaac_ros::FoundationposeRender", "debug_dir",
-    debug_dir_);
+  return std::move(score_result_);
 }
 
-void FoundationPoseNode::UpdateTfFrameNameCallback(const rclcpp::Parameter & tf_frame_name)
+// --- Callbacks ---
+
+void FoundationPoseNode::syncCallback(
+  const nitros::NitrosImage::ConstSharedPtr & rgb,
+  const nitros::NitrosImage::ConstSharedPtr & depth,
+  const sensor_msgs::msg::CameraInfo::ConstSharedPtr & cam_info,
+  const nitros::NitrosImage::ConstSharedPtr & mask)
 {
-  std::unique_lock<std::mutex> lock(mutex_);
-  tf_frame_name_ = tf_frame_name.as_string();
-  RCLCPP_INFO(
-    get_logger(),
-    "[FoundationPoseNode] Changing tf frame name to %s",
-    tf_frame_name_.c_str());
-}
-
-void FoundationPoseNode::UpdateMeshFilePathCallback(const rclcpp::Parameter & mesh_file_path)
-{
-  mesh_file_path_ = mesh_file_path.as_string();
-  RCLCPP_INFO(
-    get_logger(),
-    "[FoundationPoseNode] Changing mesh file path to %s",
-    mesh_file_path_.c_str());
-
-  getNitrosContext().setParameterStr(
-    "utils", "nvidia::isaac_ros::MeshStorage", "mesh_file_path", mesh_file_path_);
-}
-
-void FoundationPoseNode::UpdateFixedTranslationsCallback(const rclcpp::Parameter & param)
-{
-  fixed_translations_ = param.as_string_array();
-  RCLCPP_INFO(
-    get_logger(),
-    "[FoundationPoseNode] Changing fixed_translations to %s",
-    StringListToString(fixed_translations_).c_str());
-
-  getNitrosContext().setParameter1DStrVector(
-    "sampling", "nvidia::isaac_ros::FoundationposeSampling", "fixed_translations",
-    fixed_translations_);
-}
-
-void FoundationPoseNode::UpdateFixedAxisAnglesCallback(const rclcpp::Parameter & param)
-{
-  fixed_axis_angles_ = param.as_string_array();
-  RCLCPP_INFO(
-    get_logger(),
-    "[FoundationPoseNode] Changing fixed_axis_angles to %s",
-    StringListToString(fixed_axis_angles_).c_str());
-
-  getNitrosContext().setParameter1DStrVector(
-    "sampling", "nvidia::isaac_ros::FoundationposeSampling", "fixed_axis_angles",
-    fixed_axis_angles_);
-}
-
-void FoundationPoseNode::UpdateSymmetryAxesCallback(const rclcpp::Parameter & param)
-{
-  symmetry_axes_ = param.as_string_array();
-  RCLCPP_INFO(
-    get_logger(),
-    "[FoundationPoseNode] Changing symmetry_axes to %s",
-    StringListToString(symmetry_axes_).c_str());
-
-  getNitrosContext().setParameter1DStrVector(
-    "sampling", "nvidia::isaac_ros::FoundationposeSampling", "symmetry_axes", symmetry_axes_);
-}
-
-void FoundationPoseNode::UpdateSymmetryPlanesCallback(const rclcpp::Parameter & param)
-{
-  symmetry_planes_ = param.as_string_array();
-  RCLCPP_INFO(
-    get_logger(),
-    "[FoundationPoseNode] Changing symmetry_planes to %s",
-    StringListToString(symmetry_planes_).c_str());
-
-  getNitrosContext().setParameter1DStrVector(
-    "sampling", "nvidia::isaac_ros::FoundationposeSampling", "symmetry_planes", symmetry_planes_);
-}
-
-void FoundationPoseNode::FoundationPoseDetectionCallback(
-  const gxf_context_t context, nitros::NitrosTypeBase & msg)
-{
-  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_ =
-    std::make_unique<tf2_ros::TransformBroadcaster>(*this);
-  geometry_msgs::msg::TransformStamped transform_stamped;
-
-  auto msg_entity = nvidia::gxf::Entity::Shared(context, msg.handle);
-
-  // Populate timestamp information back into the header
-  auto maybe_input_timestamp = msg_entity->get<nvidia::gxf::Timestamp>();
-  if (!maybe_input_timestamp) {    // Fallback to label 'timestamp'
-    maybe_input_timestamp = msg_entity->get<nvidia::gxf::Timestamp>("timestamp");
-  }
-  if (maybe_input_timestamp) {
-    transform_stamped.header.stamp.sec = static_cast<int32_t>(
-      maybe_input_timestamp.value()->acqtime / static_cast<uint64_t>(1e9));
-    transform_stamped.header.stamp.nanosec = static_cast<uint32_t>(
-      maybe_input_timestamp.value()->acqtime % static_cast<uint64_t>(1e9));
-  } else {
-    RCLCPP_WARN(
-      get_logger(),
-      "[FoundationPoseNode] Failed to get timestamp");
-  }
-
-  //  Extract foundation pose list to a struct type defined in detection3_d_array_message.hpp
-  auto foundation_pose_detections_array_expected = nvidia::isaac::GetDetection3DListMessage(
-    msg_entity.value());
-  if (!foundation_pose_detections_array_expected) {
-    RCLCPP_ERROR(
-      get_logger(), "[FoundationPoseNode] Failed to get detections data from message entity");
+  // Run processFrame() off-executor: it cv-waits for onRefineResult/onScoreResult,
+  // which are dispatched by this same executor -> deadlock if run inline.
+  if (processing_.exchange(true)) {
     return;
   }
-  auto foundation_pose_detections_array = foundation_pose_detections_array_expected.value();
-
-  // Extract number of tags detected
-  size_t tags_count = foundation_pose_detections_array.count;
-
-  if (tags_count > 0) {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    // struct is defined in fiducial_message.hpp
-    auto pose = foundation_pose_detections_array.poses.at(0).value();
-
-    transform_stamped.header.frame_id = msg.frame_id;
-    transform_stamped.child_frame_id = tf_frame_name_;
-    transform_stamped.transform.translation.x = pose->translation.x();
-    transform_stamped.transform.translation.y = pose->translation.y();
-    transform_stamped.transform.translation.z = pose->translation.z();
-    transform_stamped.transform.rotation.x = pose->rotation.quaternion().x();
-    transform_stamped.transform.rotation.y = pose->rotation.quaternion().y();
-    transform_stamped.transform.rotation.z = pose->rotation.quaternion().z();
-    transform_stamped.transform.rotation.w = pose->rotation.quaternion().w();
-
-    tf_broadcaster_->sendTransform(transform_stamped);
+  if (processing_thread_.joinable()) {
+    processing_thread_.join();
   }
+  processing_thread_ = std::thread(
+    &FoundationPoseNode::processFrame, this, rgb, depth, cam_info, mask);
+}
+
+void FoundationPoseNode::processFrame(
+  nitros::NitrosImage::ConstSharedPtr rgb,
+  nitros::NitrosImage::ConstSharedPtr depth,
+  sensor_msgs::msg::CameraInfo::ConstSharedPtr cam_info,
+  nitros::NitrosImage::ConstSharedPtr mask)
+{
+  std::lock_guard<std::mutex> mesh_lock(mesh_mutex_);
+  auto mesh_data = mesh_loader_->getMeshData();
+  if (!mesh_data || mesh_data->num_vertices == 0) {
+    RCLCPP_WARN(get_logger(), "Mesh not loaded, skipping frame");
+    processing_.store(false);
+    return;
+  }
+
+  const uint32_t rgb_h = rgb->height;
+  const uint32_t rgb_w = rgb->width;
+  const uint32_t H = resized_image_height_;
+  const uint32_t W = resized_image_width_;
+  constexpr int32_t C = 6;
+
+  Eigen::Matrix3f K;
+  K << static_cast<float>(cam_info->k[0]), 0.0f, static_cast<float>(cam_info->k[2]),
+    0.0f, static_cast<float>(cam_info->k[4]), static_cast<float>(cam_info->k[5]),
+    0.0f, 0.0f, 1.0f;
+
+  auto rgb_handle = rgb->get_read_handle(cuda_stream_);
+  auto depth_handle = depth->get_read_handle(cuda_stream_);
+  auto mask_handle = mask->get_read_handle(cuda_stream_);
+
+  if (!pc_gpu_) {
+    const size_t pc_floats = static_cast<size_t>(rgb_h) * rgb_w * 3;
+    CHECK_CUDA_ERROR(cudaMalloc(&pc_gpu_, pc_floats * sizeof(float)), "malloc pc_gpu");
+  }
+  nvidia::isaac_ros::depth_to_xyz_map(
+    cuda_stream_, reinterpret_cast<const float *>(depth_handle.get_ptr()),
+    pc_gpu_, rgb_h, rgb_w,
+    static_cast<float>(cam_info->k[0]), static_cast<float>(cam_info->k[4]),
+    static_cast<float>(cam_info->k[2]), static_cast<float>(cam_info->k[5]));
+  CHECK_CUDA_ERROR(cudaGetLastError(), "depth_to_xyz_map");
+
+  auto sampling = sampler_->sample(
+    reinterpret_cast<const float *>(depth_handle.get_ptr()),
+    mask_handle.get_ptr(), rgb_h, rgb_w, K, mesh_data);
+
+  if (sampling.total_poses == 0) {
+    RCLCPP_WARN(get_logger(), "Sampling produced 0 poses");
+    processing_.store(false);
+    return;
+  }
+
+  size_t all_poses_bytes = sampling.total_poses * 16 * sizeof(float);
+  CHECK_CUDA_ERROR(cudaMemcpyAsync(all_poses_gpu_, sampling.poses.data(),
+    all_poses_bytes, cudaMemcpyHostToDevice, cuda_stream_), "h2d poses");
+
+  for (int iter = 0; iter < refine_iterations_; iter++) {
+    for (int b = 0; b < sampling.num_batches; b++) {
+      float * batch_ptr = all_poses_gpu_ + b * sampling.batch_size * 16;
+
+      // Acquire two pool blocks and have the renderer write directly into
+      // them. WriteHandles are kept alive across renderRefine so their dtor
+      // records the completion event AFTER the renderer's queued kernels.
+      const nitros::NitrosTensorShape refine_shape({sampling.batch_size, H, W, C});
+      nitros::NitrosTensor t_rendered, t_observed;
+      {
+        auto wh1 = t_rendered.from_pool(
+          refine_input_tensor_names_[0], refine_pool_,
+          refine_shape, nitros::NitrosDataType::kFloat32, cuda_stream_);
+        auto wh2 = t_observed.from_pool(
+          refine_input_tensor_names_[1], refine_pool_,
+          refine_shape, nitros::NitrosDataType::kFloat32, cuda_stream_);
+        renderer_->renderRefine(
+          batch_ptr, sampling.batch_size,
+          pc_gpu_, rgb_handle.get_ptr(), K, rgb_h, rgb_w, mesh_data,
+          reinterpret_cast<float *>(wh1.get_ptr()),
+          reinterpret_cast<float *>(wh2.get_ptr()));
+      }  // dtors record completion event on cuda_stream_
+
+      nitros::NitrosTensorList trt_input(cuda_stream_);
+      trt_input.set_timestamp_sec(rgb->timestamp_sec);
+      trt_input.set_timestamp_nsec(rgb->timestamp_nsec);
+      trt_input.set_frame_id(rgb->frame_id);
+      trt_input.add_tensor(std::move(t_rendered));
+      trt_input.add_tensor(std::move(t_observed));
+
+      auto refine_result = callRefineTRT(std::move(trt_input));
+
+      if (refine_result.num_tensors() < 2) {
+        RCLCPP_ERROR(get_logger(), "Refine TRT returned %zu tensors, expected 2",
+          refine_result.num_tensors());
+        break;
+      }
+
+      auto trans_handle = refine_result.get_read_handle(cuda_stream_, 0);
+      auto rot_handle = refine_result.get_read_handle(cuda_stream_, 1);
+
+      transformer_->applyDeltas(
+        batch_ptr, sampling.batch_size,
+        const_cast<void *>(static_cast<const void *>(trans_handle.get_ptr())),
+        const_cast<void *>(static_cast<const void *>(rot_handle.get_ptr())),
+        mesh_data);
+    }
+  }
+
+  // Acquire two score pool blocks; have the renderer write each batch's
+  // output into consecutive offsets of the same buffer pair. Hold the
+  // WriteHandles across all batches so the completion event covers all
+  // queued kernels.
+  const nitros::NitrosTensorShape score_shape(
+    {sampling.total_poses, H, W, C});
+  const size_t per_batch_floats =
+    static_cast<size_t>(sampling.batch_size) * H * W * C;
+  nitros::NitrosTensor t_score_rendered, t_score_observed;
+  {
+    auto wh1 = t_score_rendered.from_pool(
+      score_input_tensor_names_[0], score_pool_,
+      score_shape, nitros::NitrosDataType::kFloat32, cuda_stream_);
+    auto wh2 = t_score_observed.from_pool(
+      score_input_tensor_names_[1], score_pool_,
+      score_shape, nitros::NitrosDataType::kFloat32, cuda_stream_);
+    float * sr_base = reinterpret_cast<float *>(wh1.get_ptr());
+    float * so_base = reinterpret_cast<float *>(wh2.get_ptr());
+
+    for (int b = 0; b < sampling.num_batches; b++) {
+      float * batch_ptr = all_poses_gpu_ + b * sampling.batch_size * 16;
+      score_renderer_->renderRefine(
+        batch_ptr, sampling.batch_size,
+        pc_gpu_, rgb_handle.get_ptr(), K, rgb_h, rgb_w, mesh_data,
+        sr_base + b * per_batch_floats,
+        so_base + b * per_batch_floats);
+    }
+  }  // dtors record completion event on cuda_stream_
+
+  nitros::NitrosTensorList score_trt_input(cuda_stream_);
+  score_trt_input.set_timestamp_sec(rgb->timestamp_sec);
+  score_trt_input.set_timestamp_nsec(rgb->timestamp_nsec);
+  score_trt_input.set_frame_id(rgb->frame_id);
+  score_trt_input.add_tensor(std::move(t_score_rendered));
+  score_trt_input.add_tensor(std::move(t_score_observed));
+
+  auto score_result = callScoreTRT(std::move(score_trt_input));
+
+  if (score_result.num_tensors() == 0) {
+    RCLCPP_ERROR(get_logger(), "Score TRT returned 0 tensors");
+    processing_.store(false);
+    return;
+  }
+
+  auto scores_handle = score_result.get_read_handle(cuda_stream_, 0);
+
+  auto result = decoder_->decode(
+    all_poses_gpu_, sampling.total_poses,
+    reinterpret_cast<const float *>(scores_handle.get_ptr()),
+    mesh_data, rgb->frame_id, rgb->timestamp_sec, rgb->timestamp_nsec);
+
+  detection_pub_->publish(result.detection3d_array);
+
+  // Broadcast TF
+  if (!result.detection3d_array.detections.empty()) {
+    const auto & det = result.detection3d_array.detections.front();
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header = result.detection3d_array.header;
+    tf.child_frame_id = tf_frame_name_;
+    tf.transform.translation.x = det.bbox.center.position.x;
+    tf.transform.translation.y = det.bbox.center.position.y;
+    tf.transform.translation.z = det.bbox.center.position.z;
+    tf.transform.rotation = det.bbox.center.orientation;
+    tf_broadcaster_->sendTransform(tf);
+  }
+
+  // Publish pose matrix (4x4) as NITROS via from_pool. The pool ref-counts
+  // the buffer so subscribers (Selector / NitrosPlaybackNode) can hold the
+  // message arbitrarily long without racing the next frame's write.
+  {
+    nitros::NitrosTensor pose_tensor;
+    {
+      auto wh = pose_tensor.from_pool(
+        "output", pose_matrix_pool_,
+        nitros::NitrosTensorShape({1, 4, 4}),
+        nitros::NitrosDataType::kFloat32,
+        cuda_stream_);
+      CHECK_CUDA_ERROR(cudaMemcpyAsync(
+          wh.get_ptr(), result.pose_matrix.data(), 16 * sizeof(float),
+          cudaMemcpyHostToDevice, cuda_stream_), "h2d pose out");
+    }  // wh dtor records event after the memcpy
+
+    nitros::NitrosTensorList pose_tl(cuda_stream_);
+    pose_tl.set_timestamp_sec(rgb->timestamp_sec);
+    pose_tl.set_timestamp_nsec(rgb->timestamp_nsec);
+    pose_tl.set_frame_id(rgb->frame_id);
+    pose_tl.add_tensor(std::move(pose_tensor));
+    pose_matrix_pub_->publish(std::move(pose_tl));
+  }
+
+  processing_.store(false);
 }
 
 }  // namespace foundationpose
 }  // namespace isaac_ros
 }  // namespace nvidia
 
-#include "rclcpp_components/register_node_macro.hpp"
 RCLCPP_COMPONENTS_REGISTER_NODE(nvidia::isaac_ros::foundationpose::FoundationPoseNode)
