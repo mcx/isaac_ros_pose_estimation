@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 
 <!--
- SPDX-FileCopyrightText: Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ SPDX-FileCopyrightText: Copyright (c) 2021-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>isaac_ros_centerpose</name>
-  <version>4.4.0</version>
+  <version>4.5.0</version>
   <description>CenterPose: Pose Estimation using Deep Learning</description>
 
   <maintainer email="isaac-ros-maintainers@nvidia.com">Isaac ROS Maintainers</maintainer>
@@ -53,11 +53,10 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>tf2_eigen</depend>
+  <depend>libopencv-dev</depend>
 
   <build_depend>isaac_ros_common</build_depend>
   <build_depend>isaac_ros_gxf</build_depend>
-
-  <exec_depend>gxf_isaac_centerpose</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

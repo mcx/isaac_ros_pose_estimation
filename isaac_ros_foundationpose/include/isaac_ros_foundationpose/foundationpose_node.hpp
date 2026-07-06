@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES
-// Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,16 +18,39 @@
 #ifndef ISAAC_ROS_FOUNDATIONPOSE__FOUNDATIONPOSE_NODE_HPP_
 #define ISAAC_ROS_FOUNDATIONPOSE__FOUNDATIONPOSE_NODE_HPP_
 
+#include <cuda_runtime.h>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
-#include <vision_msgs/msg/detection3_d_array.hpp>
-
-#include "isaac_ros_nitros/nitros_node.hpp"
-#include "isaac_ros_tensor_list_interfaces/msg/tensor_list.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
+#include "std_srvs/srv/trigger.hpp"
+#include "tf2_ros/transform_broadcaster.h"
+#include "isaac_ros_nitros_image_type/nitros_image.hpp"
+#include "isaac_ros_nitros_tensor_list_type/nitros_tensor_list.hpp"
+#include "isaac_ros_tensor_list_interfaces/msg/tensor_list.hpp"
+#include "vision_msgs/msg/detection3_d_array.hpp"
+#include "isaac_ros_nitros/types/nitros_type_message_filter_traits.hpp"
+
+#include "message_filters/subscriber.h"
+#include "message_filters/synchronizer.h"
+#include "message_filters/sync_policies/approximate_time.h"
+
+#include "isaac_ros_foundationpose/foundationpose_impl/mesh_loader.hpp"
+#include "isaac_ros_foundationpose/foundationpose_impl/pose_sampler.hpp"
+#include "isaac_ros_foundationpose/foundationpose_impl/pose_renderer.hpp"
+#include "isaac_ros_foundationpose/foundationpose_impl/pose_transformer.hpp"
+#include "isaac_ros_foundationpose/foundationpose_impl/pose_decoder.hpp"
+#include "isaac_ros_foundationpose/srv/switch_mesh.hpp"
 
 using StringList = std::vector<std::string>;
 
@@ -38,94 +61,139 @@ namespace isaac_ros
 namespace foundationpose
 {
 
-/**
- * @class FoundationPoseNode
- * @brief This node performs pose estimation of an unseen object from RGBD
- */
-class FoundationPoseNode : public nitros::NitrosNode
+class FoundationPoseNode : public rclcpp::Node
 {
 public:
   explicit FoundationPoseNode(rclcpp::NodeOptions options = rclcpp::NodeOptions());
-  ~FoundationPoseNode();
-
-  void postLoadGraphCallback() override;
-
-  void FoundationPoseDetectionCallback(const gxf_context_t context, nitros::NitrosTypeBase & msg);
-
-  void UpdateTfFrameNameCallback(const rclcpp::Parameter & param);
-  void UpdateMeshFilePathCallback(const rclcpp::Parameter & param);
-  void UpdateFixedTranslationsCallback(const rclcpp::Parameter & param);
-  void UpdateFixedAxisAnglesCallback(const rclcpp::Parameter & param);
-  void UpdateSymmetryAxesCallback(const rclcpp::Parameter & param);
-  void UpdateSymmetryPlanesCallback(const rclcpp::Parameter & param);
+  ~FoundationPoseNode() override;
 
 private:
-  // The name of the YAML configuration file
-  const std::string configuration_file_;
-  uint32_t max_hypothesis_;
-  uint32_t resized_image_width_;
-  uint32_t resized_image_height_;
-  float refine_crop_ratio_;
-  float score_crop_ratio_;
-  float rot_normalizer_;
+  void syncCallback(
+    const nitros::NitrosImage::ConstSharedPtr & rgb,
+    const nitros::NitrosImage::ConstSharedPtr & depth,
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & cam_info,
+    const nitros::NitrosImage::ConstSharedPtr & mask);
 
-  // Path to the mesh files
+  void processFrame(
+    nitros::NitrosImage::ConstSharedPtr rgb,
+    nitros::NitrosImage::ConstSharedPtr depth,
+    sensor_msgs::msg::CameraInfo::ConstSharedPtr cam_info,
+    nitros::NitrosImage::ConstSharedPtr mask);
+
+  void initializePipeline();
+
+  // Blocking TRT call helpers
+  nitros::NitrosTensorList callRefineTRT(nitros::NitrosTensorList input);
+  nitros::NitrosTensorList callScoreTRT(nitros::NitrosTensorList input);
+
+  void onRefineResult(const nitros::NitrosTensorList::ConstSharedPtr & result);
+  void onScoreResult(const nitros::NitrosTensorList::ConstSharedPtr & result);
+
+  // Input sync
+  using SyncPolicy = message_filters::sync_policies::ApproximateTime<
+    nitros::NitrosImage, nitros::NitrosImage,
+    sensor_msgs::msg::CameraInfo, nitros::NitrosImage>;
+
+  std::shared_ptr<message_filters::Subscriber<nitros::NitrosImage>> rgb_sub_;
+  std::shared_ptr<message_filters::Subscriber<nitros::NitrosImage>> depth_sub_;
+  std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>> cam_info_sub_;
+  std::shared_ptr<message_filters::Subscriber<nitros::NitrosImage>> mask_sub_;
+  std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
+
+  // Output publishers
+  rclcpp::Publisher<vision_msgs::msg::Detection3DArray>::SharedPtr detection_pub_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reset_client_;
+  rclcpp::Client<isaac_ros_foundationpose::srv::SwitchMesh>::SharedPtr
+    tracking_switch_mesh_client_;
+  // Plain rclcpp publisher of NitrosTensorList. The type adapter still gives
+  // GPU zero-copy to NITROS subscribers (e.g. NitrosPlaybackNode) and
+  // automatic conversion to plain ROS TensorList for non-NITROS subscribers
+  // (e.g. the Selector).
+  rclcpp::Publisher<nitros::NitrosTensorList>::SharedPtr pose_matrix_pub_;
+
+  // TRT topic pub/sub (blocking pattern)
+  rclcpp::Publisher<nitros::NitrosTensorList>::SharedPtr refine_pub_;
+  rclcpp::Subscription<nitros::NitrosTensorList>::SharedPtr refine_sub_;
+  rclcpp::Publisher<nitros::NitrosTensorList>::SharedPtr score_pub_;
+  rclcpp::Subscription<nitros::NitrosTensorList>::SharedPtr score_sub_;
+  rclcpp::CallbackGroup::SharedPtr trt_callback_group_;
+
+  // Blocking sync state for refine TRT
+  std::mutex refine_mutex_;
+  std::condition_variable refine_cv_;
+  bool refine_result_ready_{false};
+  nitros::NitrosTensorList refine_result_;
+
+  // Blocking sync state for score TRT
+  std::mutex score_mutex_;
+  std::condition_variable score_cv_;
+  bool score_result_ready_{false};
+  nitros::NitrosTensorList score_result_;
+
+  // Single-frame processing gate and watchdog
+  std::atomic<bool> processing_{false};
+  std::thread processing_thread_;
+  rclcpp::TimerBase::SharedPtr watchdog_timer_;
+  int64_t pose_estimation_timeout_ms_{5000};
+
+  // CUDA stream
+  cudaStream_t cuda_stream_{nullptr};
+
+  // Pre-allocated GPU buffers (no cudaMalloc/cudaFree in callbacks)
+  float * all_poses_gpu_{nullptr};         // [max_hypothesis, 4, 4] sampled/refined poses
+  float * pc_gpu_{nullptr};                // [rgb_h * rgb_w * 3] lazy-alloc on first frame
+
+  // CUDA memory pools that back published NitrosTensors. Each block is sized
+  // for one tensor; tensors are acquired via NitrosTensor::from_pool, written
+  // by the renderer / our code, then handed off to the publisher. The pool's
+  // ref-counted deleter recycles the block when all consumers drop the ref.
+  nitros::CUDAMemoryPool refine_pool_;       // block = batch * H * W * 6 * 4B
+  nitros::CUDAMemoryPool score_pool_;        // block = total * H * W * 6 * 4B
+  nitros::CUDAMemoryPool pose_matrix_pool_;  // block = 16 * 4B
+
+  // Pipeline components (no TensorRT -- that is in separate nodes)
+  std::unique_ptr<MeshLoader> mesh_loader_;
+  std::unique_ptr<PoseSampler> sampler_;
+  std::unique_ptr<PoseRenderer> renderer_;
+  std::unique_ptr<PoseRenderer> score_renderer_;
+  std::unique_ptr<PoseTransformer> transformer_;
+  std::unique_ptr<PoseDecoder> decoder_;
+
+  // Parameters
+  std::string configuration_file_;
   std::string mesh_file_path_;
+  StringList refine_input_tensor_names_;
+  StringList score_input_tensor_names_;
+  float min_depth_{0.1f};
+  float max_depth_{2.0f};
+  int32_t refine_iterations_{3};
+  float rot_normalizer_{1.0f};
+  uint32_t resized_image_width_{160};
+  uint32_t resized_image_height_{160};
+  float refine_crop_ratio_{1.2f};
+  float score_crop_ratio_{1.2f};
+  int32_t max_hypothesis_{252};
 
-  const float min_depth_;
-  const float max_depth_;
-  const int32_t refine_iterations_;
+  // TF broadcast
+  std::string tf_frame_name_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  std::mutex param_mutex_;
+  std::mutex mesh_mutex_;
 
-  // Constraint parameters that can be dynamically updated
+  // Dynamic parameter callbacks
+  std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> mesh_file_path_cb_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> tf_frame_name_cb_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> fixed_translations_cb_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> fixed_axis_angles_cb_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> symmetry_axes_cb_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> symmetry_planes_cb_;
+
+  // Sampling constraint params
   StringList symmetry_axes_;
   StringList symmetry_planes_;
   StringList fixed_axis_angles_;
   StringList fixed_translations_;
-
-  // Models file path
-  const std::string refine_model_file_path_;
-  const std::string refine_engine_file_path_;
-  const std::string score_model_file_path_;
-  const std::string score_engine_file_path_;
-
-  // Input tensor names
-  const StringList refine_input_tensor_names_;
-  const StringList refine_input_binding_names_;
-  const StringList score_input_tensor_names_;
-  const StringList score_input_binding_names_;
-
-  // Output tensor names
-  const StringList refine_output_tensor_names_;
-  const StringList refine_output_binding_names_;
-  const StringList score_output_tensor_names_;
-  const StringList score_output_binding_names_;
-
-  // Parameter callback
-  std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
-  std::shared_ptr<rclcpp::ParameterCallbackHandle> mesh_file_path_param_cb_handle_;
-  std::shared_ptr<rclcpp::ParameterCallbackHandle> tf_frame_name_param_cb_handle_;
-
-  // Callback handles for constraint parameters
-  std::shared_ptr<rclcpp::ParameterCallbackHandle> fixed_translations_param_cb_handle_;
-  std::shared_ptr<rclcpp::ParameterCallbackHandle> fixed_axis_angles_param_cb_handle_;
-  std::shared_ptr<rclcpp::ParameterCallbackHandle> symmetry_axes_param_cb_handle_;
-  std::shared_ptr<rclcpp::ParameterCallbackHandle> symmetry_planes_param_cb_handle_;
-
-  // Sync parameters
-  int64_t discard_time_ms_;
-  bool discard_old_messages_;
-  int64_t pose_estimation_timeout_ms_;
-  int64_t sync_threshold_;
-
-  // TF frame name
-  std::string tf_frame_name_;
-
-  // Debug mode
-  bool debug_;
-  std::string debug_dir_;
-
-  // Mutex to protect access to tf_frame_name_
-  std::mutex mutex_;
 };
 
 }  // namespace foundationpose

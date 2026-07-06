@@ -25,8 +25,14 @@ endif()
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
+# OpenCV (solvePnP lives in calib3d; imgproc/core used elsewhere in the decoder)
+find_package(OpenCV REQUIRED COMPONENTS core calib3d imgproc imgcodecs)
+
 # Decoder node
 ament_auto_add_library(dope_decoder_node SHARED src/dope_decoder_node.cpp)
+target_include_directories(dope_decoder_node PRIVATE ${OpenCV_INCLUDE_DIRS})
+# Plain signature must match ament_auto_add_library's internal target_link_libraries usage.
+target_link_libraries(dope_decoder_node ${OpenCV_LIBS})
 rclcpp_components_register_nodes(dope_decoder_node "nvidia::isaac_ros::dope::DopeDecoderNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::dope::DopeDecoderNode;$<TARGET_FILE:dope_decoder_node>\n")
 set_target_properties(dope_decoder_node PROPERTIES

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES
-# Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,8 +25,18 @@ endif()
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
+# OpenCV (calib3d: cv::projectPoints in cuboid_pnp_solver; core/imgproc used elsewhere)
+find_package(OpenCV REQUIRED COMPONENTS calib3d core imgproc)
+
 # Decoder node
-ament_auto_add_library(centerpose_decoder_node SHARED src/centerpose_decoder_node.cpp)
+ament_auto_add_library(centerpose_decoder_node SHARED
+  src/centerpose_decoder_node.cpp
+  src/cuboid_pnp_solver.cpp
+  src/soft_nms_nvidia.cpp
+  src/cuboid3d.cpp
+)
+target_include_directories(centerpose_decoder_node PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(centerpose_decoder_node ${OpenCV_LIBS})
 rclcpp_components_register_nodes(centerpose_decoder_node "nvidia::isaac_ros::centerpose::CenterPoseDecoderNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::centerpose::CenterPoseDecoderNode;$<TARGET_FILE:centerpose_decoder_node>\n")
 set_target_properties(centerpose_decoder_node PROPERTIES
@@ -36,7 +46,13 @@ set_target_properties(centerpose_decoder_node PROPERTIES
 )
 
 # Visualizer node
-ament_auto_add_library(centerpose_visualizer_node SHARED src/centerpose_visualizer_node.cpp)
+ament_auto_add_library(centerpose_visualizer_node SHARED
+  src/centerpose_visualizer_node.cpp
+  src/cuboid3d.cpp
+)
+
+target_include_directories(centerpose_visualizer_node PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(centerpose_visualizer_node ${OpenCV_LIBS})
 rclcpp_components_register_nodes(centerpose_visualizer_node "nvidia::isaac_ros::centerpose::CenterPoseVisualizerNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::centerpose::CenterPoseVisualizerNode;$<TARGET_FILE:centerpose_visualizer_node>\n")
 set_target_properties(centerpose_visualizer_node PROPERTIES
@@ -46,6 +62,7 @@ set_target_properties(centerpose_visualizer_node PROPERTIES
 )
 
 if(BUILD_TESTING)
+  find_package(CUDAToolkit REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
   ament_lint_auto_find_test_dependencies()
@@ -61,16 +78,18 @@ if(BUILD_TESTING)
 
   # Gtest for decoder_node
   ament_add_gtest(centerpose_decoder_node_test test/centerpose_decoder_node_test.cpp)
-  target_link_libraries(centerpose_decoder_node_test centerpose_decoder_node)
+  target_link_libraries(centerpose_decoder_node_test
+    centerpose_decoder_node
+    CUDA::cudart)
   target_include_directories(centerpose_decoder_node_test PUBLIC include/isaac_ros_centerpose/)
-  ament_target_dependencies(centerpose_decoder_node_test rclcpp)
-  ament_target_dependencies(centerpose_decoder_node_test isaac_ros_nitros)
+  ament_target_dependencies(centerpose_decoder_node_test rclcpp isaac_ros_nitros)
   # The FindPythonInterp and FindPythonLibs modules are removed
   if(POLICY CMP0148)
     cmake_policy(SET CMP0148 OLD)
   endif()
 
   find_package(launch_testing_ament_cmake REQUIRED)
+  add_launch_test(test/test_centerpose_decoder_fixture.py TIMEOUT "60")
   add_launch_test(test/test_centerpose_pol.py TIMEOUT "600")
   add_launch_test(test/test_centerpose_pol_triton.py TIMEOUT "600")
 endif()
@@ -81,4 +100,4 @@ ament_index_get_resource(ISAAC_ROS_COMMON_CMAKE_PATH isaac_ros_common_cmake_path
 include("${ISAAC_ROS_COMMON_CMAKE_PATH}/isaac_ros_common-version-info.cmake")
 generate_version_info(${PROJECT_NAME})
 
-ament_auto_package(INSTALL_TO_SHARE config launch)
+ament_auto_package(INSTALL_TO_SHARE launch)

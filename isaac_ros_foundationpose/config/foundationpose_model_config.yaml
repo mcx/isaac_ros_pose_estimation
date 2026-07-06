@@ -1,6 +1,6 @@
 %YAML 1.2
 # SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES
-# Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ foundationpose:
     resized_image_width: 160
     max_hypothesis: 252
     refine_crop_ratio: 1.2
-    score_crop_ratio: 1.1
+    score_crop_ratio: 1.2
     rot_normalizer: 0.349065850398865
     trans_normalizer: [0.019999999552965164, 0.019999999552965164, 0.05000000074505806]
   

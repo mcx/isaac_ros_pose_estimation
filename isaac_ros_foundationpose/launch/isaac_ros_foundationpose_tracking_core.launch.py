@@ -23,6 +23,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer
 from launch_ros.descriptions import ComposableNode
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 # RT-DETR models expect 640x640 encoded image size
@@ -221,13 +222,75 @@ class IsaacROSFoundationPoseTrackingLaunchFragment(IsaacROSLaunchFragment):
                 package='isaac_ros_foundationpose',
                 plugin='nvidia::isaac_ros::foundationpose::Selector',
                 parameters=[{
-                    # Expect to reset after the rosbag play complete
-                    'reset_period': 65000
+                    'reset_period': ParameterValue(
+                        LaunchConfiguration('reset_period'), value_type=int),
+                    'tracking_timeout_ms': ParameterValue(
+                        LaunchConfiguration('tracking_timeout_ms'), value_type=int),
                 }],
                 remappings=[
                     ('image', 'image_rect'),
                     ('camera_info', 'camera_info_rect'),
                     ('depth_image', 'depth'),
+                ]
+            ),
+
+            'refine_trt_node': ComposableNode(
+                name='refine_trt',
+                package='isaac_ros_tensor_rt',
+                plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+                parameters=[{
+                    'engine_file_path': refine_engine_file_path,
+                    'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+                    'input_binding_names': ['input1', 'input2'],
+                    'output_tensor_names': ['output_tensor1', 'output_tensor2'],
+                    'output_binding_names': ['output1', 'output2'],
+                    'force_engine_update': False,
+                    'verbose': False,
+                    'max_batch_size': 42,
+                }],
+                remappings=[
+                    ('tensor_pub', 'refine/tensor_pub'),
+                    ('tensor_sub', 'refine/tensor_sub'),
+                ]
+            ),
+
+            'score_trt_node': ComposableNode(
+                name='score_trt',
+                package='isaac_ros_tensor_rt',
+                plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+                parameters=[{
+                    'engine_file_path': score_engine_file_path,
+                    'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+                    'input_binding_names': ['input1', 'input2'],
+                    'output_tensor_names': ['output_tensor'],
+                    'output_binding_names': ['output1'],
+                    'force_engine_update': False,
+                    'verbose': False,
+                    'max_batch_size': 252,
+                }],
+                remappings=[
+                    ('tensor_pub', 'score/tensor_pub'),
+                    ('tensor_sub', 'score/tensor_sub'),
+                ]
+            ),
+
+            'tracking_refine_trt_node': ComposableNode(
+                name='tracking_refine_trt',
+                package='isaac_ros_tensor_rt',
+                plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+                parameters=[{
+                    'engine_file_path': refine_engine_file_path,
+                    'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+                    'input_binding_names': ['input1', 'input2'],
+                    'output_tensor_names': ['output_tensor1', 'output_tensor2'],
+                    'output_binding_names': ['output1', 'output2'],
+                    'force_engine_update': False,
+                    'verbose': False,
+                    'max_batch_size': 1,
+                }],
+                remappings=[
+                    ('tensor_pub', 'tracking_refine/tensor_pub'),
+                    ('tensor_sub', 'tracking_refine/tensor_sub'),
                 ]
             ),
 
@@ -237,19 +300,10 @@ class IsaacROSFoundationPoseTrackingLaunchFragment(IsaacROSLaunchFragment):
                 plugin='nvidia::isaac_ros::foundationpose::FoundationPoseNode',
                 parameters=[{
                     'mesh_file_path': mesh_file_path,
-
-                    'refine_engine_file_path': refine_engine_file_path,
                     'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-                    'refine_input_binding_names': ['input1', 'input2'],
-                    'refine_output_tensor_names': ['output_tensor1', 'output_tensor2'],
-                    'refine_output_binding_names': ['output1', 'output2'],
-
-                    'score_engine_file_path': score_engine_file_path,
                     'score_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-                    'score_input_binding_names': ['input1', 'input2'],
-                    'score_output_tensor_names': ['output_tensor'],
-                    'score_output_binding_names': ['output1'],
-                }]
+                }],
+                remappings=[]
             ),
 
             'foundationpose_tracking_node': ComposableNode(
@@ -258,13 +312,12 @@ class IsaacROSFoundationPoseTrackingLaunchFragment(IsaacROSLaunchFragment):
                 plugin='nvidia::isaac_ros::foundationpose::FoundationPoseTrackingNode',
                 parameters=[{
                     'mesh_file_path': mesh_file_path,
-
-                    'refine_engine_file_path': refine_engine_file_path,
                     'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-                    'refine_input_binding_names': ['input1', 'input2'],
-                    'refine_output_tensor_names': ['output_tensor1', 'output_tensor2'],
-                    'refine_output_binding_names': ['output1', 'output2'],
-                }])
+
+                    'min_pointcloud_support': ParameterValue(
+                        LaunchConfiguration('min_pointcloud_support'), value_type=int),
+                }],
+                remappings=[])
 
         }
 
@@ -292,6 +345,26 @@ class IsaacROSFoundationPoseTrackingLaunchFragment(IsaacROSLaunchFragment):
                 'rt_detr_engine_file_path',
                 default_value='',
                 description='The absolute file path to the RT-DETR TensorRT engine file'),
+
+            'reset_period': DeclareLaunchArgument(
+                'reset_period',
+                default_value='600000',
+                description='Milliseconds between periodic pose-estimation re-runs. '
+                            'Set very large to effectively disable periodic re-runs.'),
+
+            'tracking_timeout_ms': DeclareLaunchArgument(
+                'tracking_timeout_ms',
+                default_value='1000',
+                description='If no tracking output is received for this many ms while in '
+                            'kTracking state, reset to kPoseEstimation to recover.'),
+
+            'min_pointcloud_support': DeclareLaunchArgument(
+                'min_pointcloud_support',
+                default_value='50',
+                description='Minimum number of point-cloud points that must lie within '
+                            'mesh_diameter/2 of the tracked pose for it to be considered '
+                            'valid. Below this, tracking skips publishing and selector '
+                            'watchdog triggers a reset.'),
         }
 
 

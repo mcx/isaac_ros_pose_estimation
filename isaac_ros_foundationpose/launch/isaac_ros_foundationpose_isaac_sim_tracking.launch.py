@@ -309,18 +309,156 @@ def generate_launch_description():
         ]
     )
 
-    # Launch ESS(depth estimation)
-    ess_node = ComposableNode(
-        name='ess_node',
-        package='isaac_ros_ess',
-        plugin='nvidia::isaac_ros::dnn_stereo_depth::ESSDisparityNode',
-        parameters=[{'engine_file_path': ess_depth_engine_file_path,
-                     'threshold': ess_depth_threshold
-                     }],
+    # Launch ESS (depth estimation) - decomposed pipeline
+    ess_left_normalize_node = ComposableNode(
+        name='ess_left_normalize_node',
+        package='isaac_ros_image_proc',
+        plugin='nvidia::isaac_ros::image_proc::ImageNormalizeNode',
+        parameters=[{
+            'mean': [127.5, 127.5, 127.5],
+            'stddev': [127.5, 127.5, 127.5],
+        }],
         remappings=[
-            ('left/image_rect', 'front_stereo_camera/left/image_rect_color_resized'),
-            ('right/image_rect', 'front_stereo_camera/right/image_rect_color_resized'),
-            ('left/camera_info', 'front_stereo_camera/left/camera_info_resized'),
+            ('image', 'front_stereo_camera/left/image_rect_color_resized'),
+            ('normalized_image', 'ess_left/image_normalize')
+        ]
+    )
+    ess_left_tensor_node = ComposableNode(
+        name='ess_left_tensor_node',
+        package='isaac_ros_tensor_proc',
+        plugin='nvidia::isaac_ros::dnn_inference::ImageToTensorNode',
+        parameters=[{
+            'scale': False,
+            'tensor_name': 'left_image',
+        }],
+        remappings=[
+            ('image', 'ess_left/image_normalize'),
+            ('tensor', 'ess_left/tensor'),
+        ]
+    )
+    ess_left_planar_node = ComposableNode(
+        name='ess_left_planar_node',
+        package='isaac_ros_tensor_proc',
+        plugin='nvidia::isaac_ros::dnn_inference::InterleavedToPlanarNode',
+        parameters=[{
+            'input_tensor_shape': [ESS_MODEL_IMAGE_HEIGHT, ESS_MODEL_IMAGE_WIDTH, 3],
+            'output_tensor_name': 'left_image'
+        }],
+        remappings=[
+            ('interleaved_tensor', 'ess_left/tensor'),
+            ('planar_tensor', 'ess_left/tensor_planar')
+        ]
+    )
+    ess_left_reshape_node = ComposableNode(
+        name='ess_left_reshape_node',
+        package='isaac_ros_tensor_proc',
+        plugin='nvidia::isaac_ros::dnn_inference::ReshapeNode',
+        parameters=[{
+            'output_tensor_name': 'left_image',
+            'input_tensor_shape': [3, ESS_MODEL_IMAGE_HEIGHT, ESS_MODEL_IMAGE_WIDTH],
+            'output_tensor_shape': [1, 3, ESS_MODEL_IMAGE_HEIGHT, ESS_MODEL_IMAGE_WIDTH]
+        }],
+        remappings=[
+            ('tensor', 'ess_left/tensor_planar'),
+            ('reshaped_tensor', 'ess_left/tensor_reshape')
+        ]
+    )
+
+    ess_right_normalize_node = ComposableNode(
+        name='ess_right_normalize_node',
+        package='isaac_ros_image_proc',
+        plugin='nvidia::isaac_ros::image_proc::ImageNormalizeNode',
+        parameters=[{
+            'mean': [127.5, 127.5, 127.5],
+            'stddev': [127.5, 127.5, 127.5],
+        }],
+        remappings=[
+            ('image', 'front_stereo_camera/right/image_rect_color_resized'),
+            ('normalized_image', 'ess_right/image_normalize')
+        ]
+    )
+    ess_right_tensor_node = ComposableNode(
+        name='ess_right_tensor_node',
+        package='isaac_ros_tensor_proc',
+        plugin='nvidia::isaac_ros::dnn_inference::ImageToTensorNode',
+        parameters=[{
+            'scale': False,
+            'tensor_name': 'right_image',
+        }],
+        remappings=[
+            ('image', 'ess_right/image_normalize'),
+            ('tensor', 'ess_right/tensor'),
+        ]
+    )
+    ess_right_planar_node = ComposableNode(
+        name='ess_right_planar_node',
+        package='isaac_ros_tensor_proc',
+        plugin='nvidia::isaac_ros::dnn_inference::InterleavedToPlanarNode',
+        parameters=[{
+            'input_tensor_shape': [ESS_MODEL_IMAGE_HEIGHT, ESS_MODEL_IMAGE_WIDTH, 3],
+            'output_tensor_name': 'right_image'
+        }],
+        remappings=[
+            ('interleaved_tensor', 'ess_right/tensor'),
+            ('planar_tensor', 'ess_right/tensor_planar')
+        ]
+    )
+    ess_right_reshape_node = ComposableNode(
+        name='ess_right_reshape_node',
+        package='isaac_ros_tensor_proc',
+        plugin='nvidia::isaac_ros::dnn_inference::ReshapeNode',
+        parameters=[{
+            'output_tensor_name': 'right_image',
+            'input_tensor_shape': [3, ESS_MODEL_IMAGE_HEIGHT, ESS_MODEL_IMAGE_WIDTH],
+            'output_tensor_shape': [1, 3, ESS_MODEL_IMAGE_HEIGHT, ESS_MODEL_IMAGE_WIDTH]
+        }],
+        remappings=[
+            ('tensor', 'ess_right/tensor_planar'),
+            ('reshaped_tensor', 'ess_right/tensor_reshape')
+        ]
+    )
+
+    ess_tensor_pair_sync_node = ComposableNode(
+        name='ess_tensor_pair_sync_node',
+        package='isaac_ros_tensor_proc',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorPairSyncNode',
+        parameters=[{
+            'input_tensor1_name': 'left_image',
+            'input_tensor2_name': 'right_image',
+            'output_tensor1_name': 'input_left',
+            'output_tensor2_name': 'input_right'
+        }],
+        remappings=[
+            ('tensor1', 'ess_left/tensor_reshape'),
+            ('tensor2', 'ess_right/tensor_reshape'),
+        ]
+    )
+
+    ess_tensor_rt_node = ComposableNode(
+        name='ess_tensor_rt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        parameters=[{
+            'engine_file_path': ess_depth_engine_file_path,
+            'input_tensor_names': ['input_left', 'input_right'],
+            'input_binding_names': ['input_left', 'input_right'],
+            'output_tensor_names': ['output_left', 'output_conf'],
+            'output_binding_names': ['output_left', 'output_conf'],
+            'verbose': False,
+            'force_engine_update': False,
+        }]
+    )
+
+    ess_decoder_node = ComposableNode(
+        name='ess_decoder',
+        package='isaac_ros_dnn_stereo_decoder',
+        plugin='nvidia::isaac_ros::dnn_stereo_depth::DNNStereoDecoderNode',
+        parameters=[{
+            'disparity_tensor_name': 'output_left',
+            'confidence_tensor_name': 'output_conf',
+            'confidence_threshold': ess_depth_threshold,
+        }],
+        remappings=[
             ('right/camera_info', 'front_stereo_camera/right/camera_info_resized')
         ]
     )
@@ -354,20 +492,10 @@ def generate_launch_description():
         parameters=[{
             'mesh_file_path': mesh_file_path,
             'texture_path': texture_path,
-
-            'refine_engine_file_path': refine_engine_file_path,
             'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'refine_input_binding_names': ['input1', 'input2'],
-            'refine_output_tensor_names': ['output_tensor1', 'output_tensor2'],
-            'refine_output_binding_names': ['output1', 'output2'],
-
-            'score_engine_file_path': score_engine_file_path,
             'score_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'score_input_binding_names': ['input1', 'input2'],
-            'score_output_tensor_names': ['output_tensor'],
-            'score_output_binding_names': ['output1'],
         }],
-    )
+        remappings=[])
 
     foundationpose_tracking_node = ComposableNode(
         name='foundationpose_tracking_node',
@@ -376,13 +504,66 @@ def generate_launch_description():
         parameters=[{
             'mesh_file_path': mesh_file_path,
             'texture_path': texture_path,
-
-            'refine_engine_file_path': refine_engine_file_path,
             'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'refine_input_binding_names': ['input1', 'input2'],
-            'refine_output_tensor_names': ['output_tensor1', 'output_tensor2'],
-            'refine_output_binding_names': ['output1', 'output2'],
-        }])
+        }],
+        remappings=[])
+
+    refine_trt_node = ComposableNode(
+        name='refine_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        parameters=[{
+            'engine_file_path': refine_engine_file_path,
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor1', 'output_tensor2'],
+            'output_binding_names': ['output1', 'output2'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 42,
+        }],
+        remappings=[
+            ('tensor_pub', 'refine/tensor_pub'),
+            ('tensor_sub', 'refine/tensor_sub'),
+        ])
+
+    score_trt_node = ComposableNode(
+        name='score_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        parameters=[{
+            'engine_file_path': score_engine_file_path,
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor'],
+            'output_binding_names': ['output1'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 252,
+        }],
+        remappings=[
+            ('tensor_pub', 'score/tensor_pub'),
+            ('tensor_sub', 'score/tensor_sub'),
+        ])
+
+    tracking_refine_trt_node = ComposableNode(
+        name='tracking_refine_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        parameters=[{
+            'engine_file_path': refine_engine_file_path,
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor1', 'output_tensor2'],
+            'output_binding_names': ['output1', 'output2'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 1,
+        }],
+        remappings=[
+            ('tensor_pub', 'tracking_refine/tensor_pub'),
+            ('tensor_sub', 'tracking_refine/tensor_sub'),
+        ])
 
     rviz_node = Node(
         package='rviz2',
@@ -409,8 +590,21 @@ def generate_launch_description():
             resize_mask_node,
             resize_left_ess_size,
             resize_right_ess_size,
-            ess_node,
+            ess_left_normalize_node,
+            ess_left_tensor_node,
+            ess_left_planar_node,
+            ess_left_reshape_node,
+            ess_right_normalize_node,
+            ess_right_tensor_node,
+            ess_right_planar_node,
+            ess_right_reshape_node,
+            ess_tensor_pair_sync_node,
+            ess_tensor_rt_node,
+            ess_decoder_node,
             disparity_to_depth_node,
+            refine_trt_node,
+            score_trt_node,
+            tracking_refine_trt_node,
             foundationpose_node,
             selector_node,
             foundationpose_tracking_node,

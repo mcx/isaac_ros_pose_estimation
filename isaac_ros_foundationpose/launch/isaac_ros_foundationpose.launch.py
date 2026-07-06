@@ -27,9 +27,7 @@ from launch_ros.descriptions import ComposableNode
 
 MESH_FILE_NAME = '/tmp/textured_simple.obj'
 TEXTURE_MAP_NAME = '/tmp/texture_map.png'
-REFINE_MODEL_NAME = '/tmp/refine_model.onnx'
 REFINE_ENGINE_NAME = '/tmp/refine_trt_engine.plan'
-SCORE_MODEL_NAME = '/tmp/score_model.onnx'
 SCORE_ENGINE_NAME = '/tmp/score_trt_engine.plan'
 
 
@@ -51,19 +49,9 @@ def generate_launch_description():
             description='The absolute file path to the texture map'),
 
         DeclareLaunchArgument(
-            'refine_model_file_path',
-            default_value=REFINE_MODEL_NAME,
-            description='The absolute file path to the refine model'),
-
-        DeclareLaunchArgument(
             'refine_engine_file_path',
             default_value=REFINE_ENGINE_NAME,
             description='The absolute file path to the refine trt engine'),
-
-        DeclareLaunchArgument(
-            'score_model_file_path',
-            default_value=SCORE_MODEL_NAME,
-            description='The absolute file path to the score model'),
 
         DeclareLaunchArgument(
             'score_engine_file_path',
@@ -94,9 +82,7 @@ def generate_launch_description():
 
     mesh_file_path = LaunchConfiguration('mesh_file_path')
     texture_path = LaunchConfiguration('texture_path')
-    refine_model_file_path = LaunchConfiguration('refine_model_file_path')
     refine_engine_file_path = LaunchConfiguration('refine_engine_file_path')
-    score_model_file_path = LaunchConfiguration('score_model_file_path')
     score_engine_file_path = LaunchConfiguration('score_engine_file_path')
     mask_height = LaunchConfiguration('mask_height')
     mask_width = LaunchConfiguration('mask_width')
@@ -110,20 +96,8 @@ def generate_launch_description():
         parameters=[{
             'mesh_file_path': mesh_file_path,
             'texture_path': texture_path,
-
-            'refine_model_file_path': refine_model_file_path,
-            'refine_engine_file_path': refine_engine_file_path,
             'refine_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'refine_input_binding_names': ['input1', 'input2'],
-            'refine_output_tensor_names': ['output_tensor1', 'output_tensor2'],
-            'refine_output_binding_names': ['output1', 'output2'],
-
-            'score_model_file_path': score_model_file_path,
-            'score_engine_file_path': score_engine_file_path,
             'score_input_tensor_names': ['input_tensor1', 'input_tensor2'],
-            'score_input_binding_names': ['input1', 'input2'],
-            'score_output_tensor_names': ['output_tensor'],
-            'score_output_binding_names': ['output1'],
         }],
         remappings=[
             ('pose_estimation/depth_image', 'depth_registered/image_rect'),
@@ -131,6 +105,44 @@ def generate_launch_description():
             ('pose_estimation/camera_info', 'rgb/camera_info'),
             ('pose_estimation/segmentation', 'segmentation'),
             ('pose_estimation/output', 'output')])
+
+    refine_trt_node = ComposableNode(
+        name='refine_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        parameters=[{
+            'engine_file_path': refine_engine_file_path,
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor1', 'output_tensor2'],
+            'output_binding_names': ['output1', 'output2'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 42,
+        }],
+        remappings=[
+            ('tensor_pub', 'refine/tensor_pub'),
+            ('tensor_sub', 'refine/tensor_sub'),
+        ])
+
+    score_trt_node = ComposableNode(
+        name='score_trt',
+        package='isaac_ros_tensor_rt',
+        plugin='nvidia::isaac_ros::dnn_inference::TensorRTNode',
+        parameters=[{
+            'engine_file_path': score_engine_file_path,
+            'input_tensor_names': ['input_tensor1', 'input_tensor2'],
+            'input_binding_names': ['input1', 'input2'],
+            'output_tensor_names': ['output_tensor'],
+            'output_binding_names': ['output1'],
+            'force_engine_update': False,
+            'verbose': False,
+            'max_batch_size': 252,
+        }],
+        remappings=[
+            ('tensor_pub', 'score/tensor_pub'),
+            ('tensor_sub', 'score/tensor_sub'),
+        ])
 
     rviz_node = Node(
         package='rviz2',
@@ -162,6 +174,8 @@ def generate_launch_description():
         package='rclcpp_components',
         executable='component_container_mt',
         composable_node_descriptions=[
+            refine_trt_node,
+            score_trt_node,
             foundationpose_node,
             detection2_d_array_filter_node,
             detection2_d_to_mask_node],
@@ -174,7 +188,10 @@ def generate_launch_description():
         namespace='foundationpose_container',
         package='rclcpp_components',
         executable='component_container_mt',
-        composable_node_descriptions=[foundationpose_node],
+        composable_node_descriptions=[
+            refine_trt_node,
+            score_trt_node,
+            foundationpose_node],
         output='screen',
         condition=UnlessCondition(launch_bbox_to_mask)
     )
